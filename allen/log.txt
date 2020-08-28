@@ -1,0 +1,34 @@
+nohup: ignoring input
+[W 09:34:22.742 NotebookApp] All authentication is disabled.  Anyone who can connect to this server will be able to run code.
+[I 09:34:22.856 NotebookApp] JupyterLab extension loaded from /root/anaconda3/lib/python3.8/site-packages/jupyterlab
+[I 09:34:22.856 NotebookApp] JupyterLab application directory is /root/anaconda3/share/jupyter/lab
+[I 09:34:22.858 NotebookApp] Serving notebooks from local directory: /data/xhp/TweetSentimentExtr
+[I 09:34:22.858 NotebookApp] The Jupyter Notebook is running at:
+[I 09:34:22.858 NotebookApp] http://10-255-0-91:15555/
+[I 09:34:22.858 NotebookApp] Use Control-C to stop this server and shut down all kernels (twice to skip confirmation).
+[I 09:35:00.486 NotebookApp] Kernel started: de669371-e3b3-4f04-a2a2-c39ae7b9f0f5
+[I 09:35:01.129 NotebookApp] Starting buffering for de669371-e3b3-4f04-a2a2-c39ae7b9f0f5:432d93e173044f81aad2c73062d84259
+[I 09:35:04.254 NotebookApp] Kernel started: da959adc-bf50-4a48-9935-0f8475b94889
+[I 09:37:04.572 NotebookApp] Saving file at /eda.ipynb
+[I 09:53:04.676 NotebookApp] Saving file at /eda.ipynb
+2020-08-27 10:35:25.275270: I tensorflow/stream_executor/platform/default/dso_loader.cc:48] Successfully opened dynamic library libcudart.so.10.1
+[I 10:37:04.578 NotebookApp] Saving file at /eda.ipynb
+[I 10:39:04.672 NotebookApp] Saving file at /eda.ipynb
+[I 10:43:04.504 NotebookApp] Saving file at /eda.ipynb
+[I 10:47:04.558 NotebookApp] Saving file at /eda.ipynb
+[I 10:49:07.160 NotebookApp] Saving file at /eda.ipynb
+[I 10:51:04.481 NotebookApp] Saving file at /eda.ipynb
+[I 10:53:04.584 NotebookApp] Saving file at /eda.ipynb
+[I 10:55:04.458 NotebookApp] Saving file at /eda.ipynb
+[I 10:57:04.761 NotebookApp] Saving file at /eda.ipynb
+[I 11:01:04.510 NotebookApp] Saving file at /eda.ipynb
+[I 11:03:04.648 NotebookApp] Saving file at /eda.ipynb
+2020-08-27 11:03:32.345111: I tensorflow/stream_executor/platform/default/dso_loader.cc:48] Successfully opened dynamic library libcudart.so.10.1
+2020-08-27 11:03:32.349760: I tensorflow/stream_executor/platform/default/dso_loader.cc:48] Successfully opened dynamic library libcudart.so.10.1
+2020-08-27 11:03:32.437886: I tensorflow/stream_executor/platform/default/dso_loader.cc:48] Successfully opened dynamic library libcudart.so.10.1
+2020-08-27 11:03:32.554986: I tensorflow/stream_executor/platform/default/dso_loader.cc:48] Successfully opened dynamic library libcudart.so.10.1
+2020-08-27 11:03:34,104 - INFO - allennlp.common.params - Rank 0 | random_seed = 13370
+2020-08-27 11:03:34,104 - INFO - allennlp.common.params - Rank 0 | numpy_seed = 1337
+2020-08-27 11:03:34,105 - INFO - allennlp.common.params - Rank 0 | pytorch_seed = 133
+2020-08-27 11:03:34,243 - INFO - allennlp.common.checks - Rank 0 | Pytorch version: 1.5.1
+[I 11:05:04.543 NotebookApp] Saving file at /eda.ipynb
