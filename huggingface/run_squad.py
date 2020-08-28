@@ -74,9 +74,14 @@ def to_list(tensor):
 
 
 def train(args, train_dataset, model, tokenizer):
+
+    num_runs = len(os.listdir(args.output_dir))
+    args.output_dir = os.path.join(args.output_dir,'result-' + str(num_runs))
+    os.mkdir(args.output_dir)
+
     """ Train the model """
     if args.local_rank in [-1, 0]:
-        tb_writer = SummaryWriter()
+        tb_writer = SummaryWriter(log_dir=args.output_dir)
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
@@ -492,16 +497,15 @@ def main():
     )
     parser.add_argument(
         "--output_dir",
-        default=None,
+        default='./results/',
         type=str,
-        required=True,
         help="The output directory where the model checkpoints and predictions will be written.",
     )
 
     # Other parameters
     parser.add_argument(
         "--data_dir",
-        default=None,
+        default='/data/xhp/TweetSentimentExtr/data',
         type=str,
         help="The input data dir. Should contain the .json files for the task."
              + "If no data dir or train/predict files are specified, will run with tensorflow_datasets.",
@@ -719,6 +723,9 @@ def main():
     # Set seed
     set_seed(args)
 
+    if not os.path.exists(args.output_dir): os.makedirs(args.output_dir)
+    if not os.path.exists(args.data_dir): os.makedirs(args.data_dir)
+
     # Load pretrained model and tokenizer
     if args.local_rank not in [-1, 0]:
         # Make sure only the first process in distributed training will download model & vocab
@@ -814,7 +821,10 @@ def main():
             result = dict((k + ("_{}".format(global_step) if global_step else ""), v) for k, v in result.items())
             results.update(result)
 
-    logger.info("Results: {}".format(results))
+    eval_result = "Results: {}".format(results)
+    logger.info(eval_result)
+    with open(os.path.join(args.output_dir, 'eval_result.txt'), 'w', encoding='utf8') as f:
+        f.write(eval_result)
 
     return results
 

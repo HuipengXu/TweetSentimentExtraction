@@ -3,11 +3,13 @@
 .git/
 .DS_Store
 data/
+data_cache/
 models/
 allen/run/
 huggingface/results/
 
-__pycache__/
+huggingface/__pycache__/
+allen/__pycache__/
 *.py[cod]
 *$py.class
 
