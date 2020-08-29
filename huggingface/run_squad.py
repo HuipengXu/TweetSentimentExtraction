@@ -23,7 +23,7 @@ import os
 import random
 import timeit
 
-from utils import squad_evaluate
+from utils import squad_evaluate, compute_predictions_log_probs, compute_predictions_logits
 
 import numpy as np
 import torch
@@ -41,11 +41,6 @@ from transformers import (
     get_linear_schedule_with_warmup,
     squad_convert_examples_to_features,
 )
-from transformers.data.metrics.squad_metrics import (
-    compute_predictions_log_probs,
-    compute_predictions_logits,
-    # squad_evaluate,
-)
 from transformers.data.processors.squad import SquadResult, SquadV1Processor, SquadV2Processor
 
 
@@ -54,6 +49,7 @@ try:
 except ImportError:
     from tensorboardX import SummaryWriter
 
+# os.environ["CUDA_VISIBLE_DEVICES"] = '4,5,6'
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +143,7 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
-    global_step = 1
+    global_step = 0
     epochs_trained = 0
     steps_trained_in_current_epoch = 0
     # Check if continuing training from a checkpoint
@@ -359,6 +355,8 @@ def evaluate(args, model, tokenizer, prefix=""):
     # Compute predictions
     output_prediction_file = os.path.join(args.output_dir, "predictions_{}.json".format(prefix))
     output_nbest_file = os.path.join(args.output_dir, "nbest_predictions_{}.json".format(prefix))
+    head_jaccard_file = os.path.join(args.output_dir, "head_jaccard_{}.json".format(prefix))
+    tail_jaccard_file = os.path.join(args.output_dir, "tail_jaccard_{}.json".format(prefix))
 
     if args.version_2_with_negative:
         output_null_log_odds_file = os.path.join(args.output_dir, "null_odds_{}.json".format(prefix))
@@ -403,7 +401,7 @@ def evaluate(args, model, tokenizer, prefix=""):
         )
 
     # Compute the F1 and exact scores.
-    results = squad_evaluate(examples, predictions)
+    results = squad_evaluate(examples, predictions, head_jaccard_file, tail_jaccard_file)
     return results
 
 
@@ -483,16 +481,14 @@ def main():
     # Required parameters
     parser.add_argument(
         "--model_type",
-        default=None,
+        default='bert',
         type=str,
-        required=True,
         help="Model type selected in the list: " + ", ".join(MODEL_TYPES),
     )
     parser.add_argument(
         "--model_name_or_path",
-        default=None,
+        default='../models/bert/',
         type=str,
-        required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models",
     )
     parser.add_argument(
@@ -512,14 +508,14 @@ def main():
     )
     parser.add_argument(
         "--train_file",
-        default=None,
+        default='train.json',
         type=str,
         help="The input training file. If a data dir is specified, will look for the file there"
              + "If no data dir or train/predict files are specified, will run with tensorflow_datasets.",
     )
     parser.add_argument(
         "--predict_file",
-        default=None,
+        default='valid.json',
         type=str,
         help="The input evaluation file. If a data dir is specified, will look for the file there"
              + "If no data dir or train/predict files are specified, will run with tensorflow_datasets.",
@@ -549,12 +545,13 @@ def main():
         "--null_score_diff_threshold",
         type=float,
         default=0.0,
-        help="If null_score - best_non_null is greater than the threshold predict null.",
+        # 如果无结果的分大于最好的有结果的分，则预测为结果
+        help="If (null_score - best_non_null) is greater than the threshold predict null.",
     )
 
     parser.add_argument(
         "--max_seq_length",
-        default=384,
+        default=180,
         type=int,
         help="The maximum total input sequence length after WordPiece tokenization. Sequences "
              "longer than this will be truncated, and sequences shorter than this will be padded.",
@@ -572,20 +569,20 @@ def main():
         help="The maximum number of tokens for the question. Questions longer than this will "
              "be truncated to this length.",
     )
-    parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
-    parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the dev set.")
+    parser.add_argument("--do_train", default=True, type=bool, help="Whether to run training.")
+    parser.add_argument("--do_eval", default=True, type=bool, help="Whether to run eval on the dev set.")
     parser.add_argument(
         "--evaluate_during_training", action="store_true", help="Run evaluation during training at each logging step."
     )
     parser.add_argument(
-        "--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model."
+        "--do_lower_case", default=True, type=bool, help="Set this flag if you are using an uncased model."
     )
 
-    parser.add_argument("--per_gpu_train_batch_size", default=8, type=int, help="Batch size per GPU/CPU for training.")
+    parser.add_argument("--per_gpu_train_batch_size", default=45, type=int, help="Batch size per GPU/CPU for training.")
     parser.add_argument(
-        "--per_gpu_eval_batch_size", default=8, type=int, help="Batch size per GPU/CPU for evaluation."
+        "--per_gpu_eval_batch_size", default=45, type=int, help="Batch size per GPU/CPU for evaluation."
     )
-    parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
+    parser.add_argument("--learning_rate", default=3e-5, type=float, help="The initial learning rate for Adam.")
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
@@ -596,7 +593,7 @@ def main():
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
     parser.add_argument(
-        "--num_train_epochs", default=3.0, type=float, help="Total number of training epochs to perform."
+        "--num_train_epochs", default=6.0, type=float, help="Total number of training epochs to perform."
     )
     parser.add_argument(
         "--max_steps",
@@ -631,8 +628,8 @@ def main():
         help="language id of input for language-specific xlm models (see tokenization_xlm.PRETRAINED_INIT_CONFIGURATION)",
     )
 
-    parser.add_argument("--logging_steps", type=int, default=500, help="Log every X updates steps.")
-    parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every X updates steps.")
+    parser.add_argument("--logging_steps", type=int, default=300, help="Log every X updates steps.")
+    parser.add_argument("--save_steps", type=int, default=300, help="Save checkpoint every X updates steps.")
     parser.add_argument(
         "--eval_all_checkpoints",
         action="store_true",
@@ -640,10 +637,10 @@ def main():
     )
     parser.add_argument("--no_cuda", action="store_true", help="Whether not to use CUDA when available")
     parser.add_argument(
-        "--overwrite_output_dir", action="store_true", help="Overwrite the content of the output directory"
+        "--overwrite_output_dir", default=True, type=bool, help="Overwrite the content of the output directory"
     )
     parser.add_argument(
-        "--overwrite_cache", action="store_true", help="Overwrite the cached training and evaluation sets"
+        "--overwrite_cache", default=False, type=bool, help="Overwrite the cached training and evaluation sets"
     )
     parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
 
