@@ -5,6 +5,8 @@ import logging
 import math
 import json
 
+import pandas as pd
+
 from transformers.tokenization_bert import BasicTokenizer
 logger = logging.getLogger(__name__)
 
@@ -336,7 +338,9 @@ def compute_predictions_logits(
         n_best_size,
         max_answer_length,
         do_lower_case,
+        do_test,
         output_prediction_file,
+        submission_prediction_file,
         output_nbest_file,
         output_null_log_odds_file,
         verbose_logging,
@@ -367,6 +371,7 @@ def compute_predictions_logits(
     )
 
     all_predictions = collections.OrderedDict()
+    sub_predictions = collections.OrderedDict()
     all_nbest_json = collections.OrderedDict()
     scores_diff_json = collections.OrderedDict()
 
@@ -527,27 +532,34 @@ def compute_predictions_logits(
 
         if not version_2_with_negative:
             all_predictions[example.qas_id] = nbest_json[0]
+            sub_predictions[example.qas_id] = best_non_null_entry.text
         else:
             # predict "" iff the null score - the score of best non-null > threshold
             score_diff = score_null - best_non_null_entry.start_logit - (best_non_null_entry.end_logit)
             scores_diff_json[example.qas_id] = score_diff
             if score_diff > null_score_diff_threshold:
                 all_predictions[example.qas_id] = ""
+                sub_predictions[example.qas_id] = ""
             else:
                 all_predictions[example.qas_id] = nbest_json[0]
+                sub_predictions[example.qas_id] = best_non_null_entry.text
         all_nbest_json[example.qas_id] = nbest_json
 
-    if output_prediction_file:
-        with open(output_prediction_file, "w") as writer:
-            writer.write(json.dumps(all_predictions, indent=4) + "\n")
+    if do_test:
+        submission_df = pd.DataFrame(sub_predictions.items(), columns=['textID','selected_text'])
+        submission_df.to_csv(submission_prediction_file, index=False, encoding='utf8')
+    else:
+        if output_prediction_file:
+            with open(output_prediction_file, "w") as writer:
+                writer.write(json.dumps(all_predictions, indent=4) + "\n")
 
-    if output_nbest_file:
-        with open(output_nbest_file, "w") as writer:
-            writer.write(json.dumps(all_nbest_json, indent=4) + "\n")
+        if output_nbest_file:
+            with open(output_nbest_file, "w") as writer:
+                writer.write(json.dumps(all_nbest_json, indent=4) + "\n")
 
-    if output_null_log_odds_file and version_2_with_negative:
-        with open(output_null_log_odds_file, "w") as writer:
-            writer.write(json.dumps(scores_diff_json, indent=4) + "\n")
+        if output_null_log_odds_file and version_2_with_negative:
+            with open(output_null_log_odds_file, "w") as writer:
+                writer.write(json.dumps(scores_diff_json, indent=4) + "\n")
 
     return all_predictions
 

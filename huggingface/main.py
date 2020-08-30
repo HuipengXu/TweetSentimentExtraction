@@ -41,6 +41,12 @@ from transformers import (
     get_linear_schedule_with_warmup,
     squad_convert_examples_to_features,
 )
+
+# from transformers.data.metrics.squad_metrics import (
+#     compute_predictions_log_probs,
+#     compute_predictions_logits,
+#     squad_evaluate,
+# )
 from transformers.data.processors.squad import SquadResult, SquadV1Processor, SquadV2Processor
 
 
@@ -233,7 +239,7 @@ def train(args, train_dataset, model, tokenizer):
                 if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     # Only evaluate when single GPU otherwise metrics may not average well
                     if args.local_rank == -1 and args.evaluate_during_training:
-                        results = evaluate(args, model, tokenizer)
+                        results = evaluate(args, model, tokenizer, do_test=args.do_test)
                         for key, value in results.items():
                             tb_writer.add_scalar("eval_{}".format(key), value, global_step)
                     tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
@@ -269,11 +275,15 @@ def train(args, train_dataset, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, prefix=""):
+def evaluate(args, model, tokenizer, do_test=False, prefix=""):
     dataset, examples, features = load_and_cache_examples(args, tokenizer, evaluate=True, output_examples=True)
 
-    if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-        os.makedirs(args.output_dir)
+    if do_test:
+        if args.kaggle_output_dir is None:
+            num_runs = len(os.listdir(args.output_dir))
+            args.output_dir = os.path.join(args.output_dir,'result-' + str(num_runs-1))
+        else:
+            args.output_dir = args.kaggle_output_dir
 
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
 
@@ -354,6 +364,7 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     # Compute predictions
     output_prediction_file = os.path.join(args.output_dir, "predictions_{}.json".format(prefix))
+    submission_prediction_file = os.path.join(args.output_dir, "submission.csv")
     output_nbest_file = os.path.join(args.output_dir, "nbest_predictions_{}.json".format(prefix))
     head_jaccard_file = os.path.join(args.output_dir, "head_jaccard_{}.json".format(prefix))
     tail_jaccard_file = os.path.join(args.output_dir, "tail_jaccard_{}.json".format(prefix))
@@ -391,7 +402,9 @@ def evaluate(args, model, tokenizer, prefix=""):
             args.n_best_size,
             args.max_answer_length,
             args.do_lower_case,
+            do_test,
             output_prediction_file,
+            submission_prediction_file,
             output_nbest_file,
             output_null_log_odds_file,
             args.verbose_logging,
@@ -399,6 +412,7 @@ def evaluate(args, model, tokenizer, prefix=""):
             args.null_score_diff_threshold,
             tokenizer,
         )
+    if do_test: return {}
 
     # Compute the F1 and exact scores.
     results = squad_evaluate(examples, predictions, head_jaccard_file, tail_jaccard_file)
@@ -497,11 +511,22 @@ def main():
         type=str,
         help="The output directory where the model checkpoints and predictions will be written.",
     )
-
+    parser.add_argument(
+        "--submission_models",
+        default=None,
+        type=str,
+        help="model have been finetuned, used for predicting test file ",
+    )
     # Other parameters
     parser.add_argument(
+        "--kaggle_output_dir",
+        default=None,
+        type=str,
+        help="kaggle kernel output directory",
+    )
+    parser.add_argument(
         "--data_dir",
-        default='/data/xhp/TweetSentimentExtr/data',
+        default='/xhp/TweetSentimentExtr/data',
         type=str,
         help="The input data dir. Should contain the .json files for the task."
              + "If no data dir or train/predict files are specified, will run with tensorflow_datasets.",
@@ -569,13 +594,14 @@ def main():
         help="The maximum number of tokens for the question. Questions longer than this will "
              "be truncated to this length.",
     )
-    parser.add_argument("--do_train", default=True, type=bool, help="Whether to run training.")
-    parser.add_argument("--do_eval", default=True, type=bool, help="Whether to run eval on the dev set.")
+    parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
+    parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the dev set.")
+    parser.add_argument("--do_test", action="store_true", help="Whether to run test on the test set.")
     parser.add_argument(
         "--evaluate_during_training", action="store_true", help="Run evaluation during training at each logging step."
     )
     parser.add_argument(
-        "--do_lower_case", default=True, type=bool, help="Set this flag if you are using an uncased model."
+        "--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model."
     )
 
     parser.add_argument("--per_gpu_train_batch_size", default=45, type=int, help="Batch size per GPU/CPU for training.")
@@ -637,10 +663,7 @@ def main():
     )
     parser.add_argument("--no_cuda", action="store_true", help="Whether not to use CUDA when available")
     parser.add_argument(
-        "--overwrite_output_dir", default=True, type=bool, help="Overwrite the content of the output directory"
-    )
-    parser.add_argument(
-        "--overwrite_cache", default=False, type=bool, help="Overwrite the cached training and evaluation sets"
+        "--overwrite_cache", action="store_true", help="Overwrite the cached training and evaluation sets"
     )
     parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
 
@@ -668,18 +691,6 @@ def main():
             "WARNING - You've set a doc stride which may be superior to the document length in some "
             "examples. This could result in errors when building features from the examples. Please reduce the doc "
             "stride or increase the maximum length to ensure the features are correctly built."
-        )
-
-    if (
-            os.path.exists(args.output_dir)
-            and os.listdir(args.output_dir)
-            and args.do_train
-            and not args.overwrite_output_dir
-    ):
-        raise ValueError(
-            "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(
-                args.output_dir
-            )
         )
 
     # Setup distant debugging if needed
@@ -789,8 +800,8 @@ def main():
         model.to(args.device)
 
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
-    results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
+        results = {}
         if args.do_train:
             logger.info("Loading checkpoints saved during training for evaluation")
             checkpoints = [args.output_dir]
@@ -813,18 +824,31 @@ def main():
             model.to(args.device)
 
             # Evaluate
-            result = evaluate(args, model, tokenizer, prefix=global_step)
+            result = evaluate(args, model, tokenizer, do_test=args.do_test, prefix=global_step)
 
             result = dict((k + ("_{}".format(global_step) if global_step else ""), v) for k, v in result.items())
             results.update(result)
 
-    eval_result = "Results: {}".format(results)
-    logger.info(eval_result)
-    with open(os.path.join(args.output_dir, 'eval_result.txt'), 'w', encoding='utf8') as f:
-        f.write(eval_result)
+        eval_result = "Results: {}".format(results)
+        logger.info(eval_result)
+        with open(os.path.join(args.output_dir, 'eval_result.txt'), 'w', encoding='utf8') as f:
+            f.write(eval_result)
 
-    return results
+        return results
 
+    # generate submission file
+    if args.do_test:
+        logger.info("Loading checkpoints saved during training for testing")
+        if args.submission_models is None:
+            if args.do_train:
+                args.submission_models = args.output_dir
+            else:
+                num_runs = len(os.listdir(args.output_dir))
+                args.submission_models = os.path.join(args.output_dir, 'result-' + str(num_runs-1))
+        model = AutoModelForQuestionAnswering.from_pretrained(args.submission_models)
+        tokenizer = AutoTokenizer.from_pretrained(args.submission_models, do_lower_case=args.do_lower_case)
+        model.to(args.device)
+        evaluate(args, model, tokenizer, do_test=args.do_test)
 
 if __name__ == "__main__":
     main()
