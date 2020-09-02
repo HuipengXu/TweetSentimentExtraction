@@ -1,8 +1,8 @@
-#export CUDA_VISIBLE_DEVICES=1,2,3,4
-
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 python main.py \
-  --model_type bert \
-  --model_name_or_path ../models/bert/ \
+  --model_type roberta \
+  --model_name_or_path ../models/roberta-base/ \
+  --model_arch roberta-base \
   --do_train \
   --do_eval \
   --do_lower_case \

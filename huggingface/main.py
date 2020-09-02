@@ -77,8 +77,7 @@ def to_list(tensor):
 
 def train(args, train_dataset, model, tokenizer):
 
-    num_runs = len(os.listdir(args.output_dir))
-    args.output_dir = os.path.join(args.output_dir,'result-' + str(num_runs))
+    args.output_dir = os.path.join(args.output_dir, args.model_arch, '-result')
     os.mkdir(args.output_dir)
 
     """ Train the model """
@@ -502,6 +501,12 @@ def main():
     parser.add_argument(
         "--model_name_or_path",
         default='../models/bert/',
+        type=str,
+        help="Path to pretrained model or model identifier from huggingface.co/models",
+    )
+    parser.add_argument(
+        "--model_arch",
+        default='bert-base-cased',
         type=str,
         help="Path to pretrained model or model identifier from huggingface.co/models",
     )
