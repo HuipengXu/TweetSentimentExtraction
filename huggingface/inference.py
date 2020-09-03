@@ -1,9 +1,8 @@
-
 import collections
 import logging
 import math
 import os
-import json
+import argparse
 import timeit
 from tqdm import tqdm
 
@@ -471,18 +470,46 @@ def to_squad(data):
         output['data'].append({'title': 'None', 'paragraphs': paragraphs})
     return output
 
+def main():
+    config = {
+        'trained_model_dir':'',
+        'data_dir': '/kaggle/input',
+        'output_dir': '/kaggle/working/'
+    }
+    # parser = argparse.ArgumentParser()
+    #
+    # # Required parameters
+    # parser.add_argument(
+    #     "--trained_model_dir",
+    #     default='',
+    #     type=str,
+    # )
+    # parser.add_argument(
+    #     "--data_dir",
+    #     default='/kaggle/input',
+    #     type=str,
+    # )
+    # parser.add_argument(
+    #     "--output_dir",
+    #     default='/kaggle/working/',
+    #     type=str,
+    # )
+    # args = parser.parse_args()
 
-models_dir = 'pretrained'
-models_dir = '/kaggle/input/' + models_dir
-args = torch.load(os.path.join(models_dir, 'training_args.bin'))
-args.data_dir = '/kaggle/input'
 
-test_df = pd.read_csv(args.data_dir + 'test.csv')
-test = np.array(test_df)
-test_json = to_squad(test)
+    # train_args = torch.load(os.path.join(args.trained_model_dir, 'training_args.bin'))
+    train_args = torch.load(os.path.join(config['trained_model_dir'], 'training_args.bin'))
+    # train_args.output_dir = args.output_dir
+    train_args.output_dir = config['output_dir']
 
-logger.info("Loading checkpoints saved during training for testing")
-model = AutoModelForQuestionAnswering.from_pretrained(args.submission_models)
-tokenizer = AutoTokenizer.from_pretrained(args.submission_models, do_lower_case=args.do_lower_case)
-model.to(args.device)
-evaluate(args, model, tokenizer, test_json)
+    # test_df = pd.read_csv(args.data_dir + 'test.csv')
+    test_df = pd.read_csv(config['data_dir'] + 'test.csv')
+    test = np.array(test_df)
+    test_json = to_squad(test)
+
+    logger.info("Loading checkpoints saved during training for testing")
+    # model = AutoModelForQuestionAnswering.from_pretrained(args.trained_model_dir)
+    model = AutoModelForQuestionAnswering.from_pretrained(config['trained_model_dir'])
+    tokenizer = AutoTokenizer.from_pretrained(config['trained_model_dir'], do_lower_case=train_args.do_lower_case)
+    model.to(train_args.device)
+    evaluate(train_args, model, tokenizer, test_json)

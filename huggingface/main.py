@@ -20,6 +20,7 @@ import argparse
 import glob
 import logging
 import os
+import re
 import random
 import timeit
 
@@ -41,6 +42,7 @@ from transformers import (
     get_linear_schedule_with_warmup,
     squad_convert_examples_to_features,
 )
+from model import QuestionAnswering
 
 # from transformers.data.metrics.squad_metrics import (
 #     compute_predictions_log_probs,
@@ -77,8 +79,14 @@ def to_list(tensor):
 
 def train(args, train_dataset, model, tokenizer):
 
-    args.output_dir = os.path.join(args.output_dir, args.model_arch, '-result')
-    os.mkdir(args.output_dir)
+    base_output_dir = args.model_arch + '-result'
+    output_dir_pattern = re.compile(base_output_dir + r'.*')
+    count = 0
+    for d in os.listdir(args.output_dir):
+        if output_dir_pattern.match(d):
+            count += 1
+    args.output_dir += base_output_dir + '-' + str(count)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     """ Train the model """
     if args.local_rank in [-1, 0]:
@@ -93,6 +101,7 @@ def train(args, train_dataset, model, tokenizer):
         args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
     else:
         t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
+    args.logging_steps = int(args.logging_step_ratio * t_total)
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ["bias", "LayerNorm.weight"]
@@ -246,7 +255,8 @@ def train(args, train_dataset, model, tokenizer):
                     logging_loss = tr_loss
 
                 # Save model checkpoint
-                if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
+                if args.local_rank in [-1, 0] and global_step / t_total > 0.85\
+                        and global_step % args.save_steps == 0:
                     output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
                     # Take care of distributed/parallel training
                     model_to_save = model.module if hasattr(model, "module") else model
@@ -659,8 +669,8 @@ def main():
         help="language id of input for language-specific xlm models (see tokenization_xlm.PRETRAINED_INIT_CONFIGURATION)",
     )
 
-    parser.add_argument("--logging_steps", type=int, default=300, help="Log every X updates steps.")
-    parser.add_argument("--save_steps", type=int, default=300, help="Save checkpoint every X updates steps.")
+    parser.add_argument("--logging_step_ratio", type=float, default=0.1, help="Log every X updates steps.")
+    parser.add_argument("--save_steps", type=int, default=100, help="Log every X updates steps.")
     parser.add_argument(
         "--eval_all_checkpoints",
         action="store_true",
@@ -786,22 +796,26 @@ def main():
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
+    output_dir = ''
     # Save the trained model and the tokenizer
     if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        logger.info("Saving model checkpoint to %s", args.output_dir)
+        output_dir = os.path.join(args.output_dir, "checkpoint-final")
+        logger.info("Saving model checkpoint to %s", output_dir)
         # Save a trained model, configuration and tokenizer using `save_pretrained()`.
         # They can then be reloaded using `from_pretrained()`
         # Take care of distributed/parallel training
+        # Take care of distributed/parallel training
         model_to_save = model.module if hasattr(model, "module") else model
-        model_to_save.save_pretrained(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
+        if not os.path.exists(output_dir): os.mkdir(output_dir)
+        model_to_save.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
 
         # Good practice: save your training arguments together with the trained model
-        torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
+        torch.save(args, os.path.join(output_dir, "training_args.bin"))
 
         # Load a trained model and vocabulary that you have fine-tuned
-        model = AutoModelForQuestionAnswering.from_pretrained(args.output_dir)  # , force_download=True)
-        tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        model = AutoModelForQuestionAnswering.from_pretrained(output_dir)  # , force_download=True)
+        tokenizer = AutoTokenizer.from_pretrained(output_dir, do_lower_case=args.do_lower_case)
         model.to(args.device)
 
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
@@ -809,7 +823,7 @@ def main():
         results = {}
         if args.do_train:
             logger.info("Loading checkpoints saved during training for evaluation")
-            checkpoints = [args.output_dir]
+            checkpoints = [output_dir]
             if args.eval_all_checkpoints:
                 checkpoints = list(
                     os.path.dirname(c)
@@ -825,16 +839,18 @@ def main():
         for checkpoint in checkpoints:
             # Reload the model
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
+            logger.info(f"Evaluate the checkpoint: {checkpoint}")
             model = AutoModelForQuestionAnswering.from_pretrained(checkpoint)  # , force_download=True)
             model.to(args.device)
 
             # Evaluate
+            args.output_dir = checkpoint
             result = evaluate(args, model, tokenizer, do_test=args.do_test, prefix=global_step)
-
             result = dict((k + ("_{}".format(global_step) if global_step else ""), v) for k, v in result.items())
             results.update(result)
 
         eval_result = "Results: {}".format(results)
+        args.output_dir = output_dir
         logger.info(eval_result)
         with open(os.path.join(args.output_dir, 'eval_result.txt'), 'w', encoding='utf8') as f:
             f.write(eval_result)
