@@ -5,8 +5,7 @@
 
 2020.08.31 —— 2020.09.05
 
-![实验记录](https://raw.githubusercontent.com/HuipengXu/Images/master/experiments.png)
-
+![实验记录](https://i.loli.net/2020/09/06/Pk6X7N5CobRKSh8.png)
 * 表中 \* 表示一致
 * last2h 表示使用最后两层隐藏状态
 
