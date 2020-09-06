@@ -7,6 +7,7 @@ data_cache/
 models/
 allen/run/
 huggingface/results/
+huggingface/results1/
 
 huggingface/__pycache__/
 allen/__pycache__/

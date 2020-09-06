@@ -4,10 +4,16 @@ import collections
 import logging
 import math
 import json
+import os
 
+import numpy as np
 import pandas as pd
 
+import torch
+from torch.utils.data import Dataset
+
 from transformers.tokenization_bert import BasicTokenizer
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,18 +48,18 @@ def compute_exact(a_gold, a_pred):
 
 
 def compute_jaccard(a_gold, a_pred):
-    gold_toks = get_tokens(a_gold)
-    pred_toks = get_tokens(a_pred)
-    gold_toks_set = collections.Counter(gold_toks)
-    pred_toks_set = collections.Counter(pred_toks)
-    common = gold_toks_set & pred_toks_set
+    # gold_toks = get_tokens(a_gold)
+    # pred_toks = get_tokens(a_pred)
+    gold_toks = set(a_gold.strip().split())
+    pred_toks = set(a_pred.strip().split())
+    common = gold_toks & pred_toks
     num_same = len(common)
     if len(gold_toks) == 0 or len(pred_toks) == 0:
         # If either is no-answer, then F1 is 1 if they agree, 0 otherwise
         return int(gold_toks == pred_toks)
     if num_same == 0:
         return 0
-    jaccard = float(num_same) / (len(gold_toks_set) + len(pred_toks_set) - num_same)
+    jaccard = float(num_same) / (len(gold_toks) + len(pred_toks) - num_same)
     return jaccard
 
 
@@ -184,7 +190,8 @@ def squad_evaluate(examples, preds, head_jaccard_file, tail_jaccard_file,
     exact_threshold = apply_no_ans_threshold(
         exact, no_answer_probs, qas_id_to_has_answer, no_answer_probability_threshold
     )
-    jaccard_threshold = apply_no_ans_threshold(jaccard, no_answer_probs, qas_id_to_has_answer, no_answer_probability_threshold)
+    jaccard_threshold = apply_no_ans_threshold(jaccard, no_answer_probs, qas_id_to_has_answer,
+                                               no_answer_probability_threshold)
 
     evaluation = make_eval_dict(exact_threshold, jaccard_threshold)
 
@@ -292,7 +299,7 @@ def get_final_text(pred_text, orig_text, do_lower_case, verbose_logging=False):
             logger.info("Couldn't map end position")
         return orig_text
 
-    output_text = orig_text[orig_start_position : (orig_end_position + 1)]
+    output_text = orig_text[orig_start_position: (orig_end_position + 1)]
     return output_text
 
 
@@ -457,10 +464,10 @@ def compute_predictions_logits(
                 break
             feature = features[pred.feature_index]
             if pred.start_index > 0:  # this is a non-null prediction
-                tok_tokens = feature.tokens[pred.start_index : (pred.end_index + 1)]
+                tok_tokens = feature.tokens[pred.start_index: (pred.end_index + 1)]
                 orig_doc_start = feature.token_to_orig_map[pred.start_index]
                 orig_doc_end = feature.token_to_orig_map[pred.end_index]
-                orig_tokens = example.doc_tokens[orig_doc_start : (orig_doc_end + 1)]
+                orig_tokens = example.doc_tokens[orig_doc_start: (orig_doc_end + 1)]
 
                 tok_text = tokenizer.convert_tokens_to_string(tok_tokens)
 
@@ -514,7 +521,7 @@ def compute_predictions_logits(
                 if entry.text:
                     best_non_null_entry = entry
 
-        probs = _compute_softmax(total_scores) # 计算的概率是 nbest 中的分布概率，并不是基于整个段落
+        probs = _compute_softmax(total_scores)  # 计算的概率是 nbest 中的分布概率，并不是基于整个段落
 
         nbest_json = []
         for (i, entry) in enumerate(nbest):
@@ -522,7 +529,10 @@ def compute_predictions_logits(
             output['text'] = example_text
             output['sentiment'] = example.question_text
             output['gold_selected'] = entry.gold_selected
-            output["pred_selected"] = entry.text
+            if example.question_text == 'neutral':
+                output["pred_selected"] = example_text
+            else:
+                output["pred_selected"] = entry.text
             output["probability"] = probs[i]
             output["start_logit"] = entry.start_logit
             output["end_logit"] = entry.end_logit
@@ -532,7 +542,7 @@ def compute_predictions_logits(
 
         if not version_2_with_negative:
             all_predictions[example.qas_id] = nbest_json[0]
-            sub_predictions[example.qas_id] = best_non_null_entry.text
+            sub_predictions[example.qas_id] = nbest_json[0]['pred_selected']
         else:
             # predict "" iff the null score - the score of best non-null > threshold
             score_diff = score_null - best_non_null_entry.start_logit - (best_non_null_entry.end_logit)
@@ -546,7 +556,7 @@ def compute_predictions_logits(
         all_nbest_json[example.qas_id] = nbest_json
 
     if do_test:
-        submission_df = pd.DataFrame(sub_predictions.items(), columns=['textID','selected_text'])
+        submission_df = pd.DataFrame(sub_predictions.items(), columns=['textID', 'selected_text'])
         submission_df.to_csv(submission_prediction_file, index=False, encoding='utf8')
     else:
         if output_prediction_file:
@@ -680,10 +690,10 @@ def compute_predictions_log_probs(
             # final_text = paragraph_text[start_orig_pos: end_orig_pos + 1].strip()
 
             # Previously used Bert untokenizer
-            tok_tokens = feature.tokens[pred.start_index : (pred.end_index + 1)]
+            tok_tokens = feature.tokens[pred.start_index: (pred.end_index + 1)]
             orig_doc_start = feature.token_to_orig_map[pred.start_index]
             orig_doc_end = feature.token_to_orig_map[pred.end_index]
-            orig_tokens = example.doc_tokens[orig_doc_start : (orig_doc_end + 1)]
+            orig_tokens = example.doc_tokens[orig_doc_start: (orig_doc_end + 1)]
             tok_text = tokenizer.convert_tokens_to_string(tok_tokens)
 
             # Clean whitespace
@@ -753,3 +763,160 @@ def compute_predictions_log_probs(
 
     return all_predictions
 
+
+# TODO 用自己的方法试试，对 text 和 selected_text 同时 tokenize，然后在 text 中 find
+def process_data(tokenizer, text, selected_text, sentiment, max_length):
+    text = ' ' + ' '.join(str(text).split())
+    selected_text = ' ' + ' '.join(str(selected_text).split())
+
+    start_idx = end_idx = None
+    for i, c in enumerate(text):
+        if c == selected_text[1] and ' ' + text[i: i + len(selected_text) - 1] == selected_text:
+            start_idx = i
+            end_idx = i + len(selected_text) - 2
+            break
+
+    char_targets = np.zeros(len(text))
+    if start_idx is not None and end_idx is not None:
+        char_targets[start_idx: end_idx + 1] = 1
+
+    tok_text = tokenizer.encode(text)
+    input_ids_orig = tok_text.ids
+    text_offsets = tok_text.offsets
+
+    target_idxs = []
+    for i, (offset1, offset2) in enumerate(text_offsets):
+        if char_targets[offset1: offset2].sum() > 0:
+            target_idxs.append(i)
+
+    tok_start_idx = target_idxs[0]
+    tok_end_idx = target_idxs[-1]
+
+    sentiment_id = {'positive': 1313, 'negative': 2430, 'neutral': 7974}
+    input_ids = [0] + [sentiment_id[sentiment]] + [2] + [2] + input_ids_orig + [2]
+    token_type_ids = [0] * len(input_ids)
+    attention_mask = [1] * len(input_ids)
+    text_offsets = [(0, 0)] * 4 + text_offsets + [(0, 0)]  # 0 用来表示特殊符号的范围，比如 <s></s>，(0, 0) 表示不可用
+    tok_start_idx += 4
+    tok_end_idx += 4
+
+    padding_length = max_length - len(input_ids)
+    if padding_length > 0:
+        input_ids += [1] * padding_length
+        attention_mask += [0] * padding_length
+        token_type_ids += [0] * padding_length
+        text_offsets += [(0, 0)] * padding_length
+    elif padding_length < 0:
+        input_ids = input_ids[:max_length]
+        attention_mask = attention_mask[:max_length]
+        token_type_ids = token_type_ids[:max_length]
+        text_offsets = text_offsets[:max_length]
+
+    return {
+        'input_ids': input_ids,
+        'attention_mask': attention_mask,
+        'token_type_ids': token_type_ids,
+        'text_offsets': text_offsets,
+        'selected_text': selected_text,
+        'text': text,
+        'sentiment': sentiment,
+        'tok_start_idx': tok_start_idx,
+        'tok_end_idx': tok_end_idx
+    }
+
+
+class TweetData(Dataset):
+
+    def __init__(self, tokenizer, example_ids, texts, sentiments, selected_texts, max_length=128, evaluate=False):
+        super(TweetData, self).__init__()
+        self.tokenizer = tokenizer
+        self.example_ids = example_ids
+        self.texts = texts
+        self.sentiments = sentiments
+        self.selected_texts = selected_texts
+        self.max_length = max_length
+        self.evaluate = evaluate
+
+    def __getitem__(self, item):
+        data = process_data(self.tokenizer,
+                            self.texts[item],
+                            self.selected_texts[item],
+                            self.sentiments[item],
+                            self.max_length)
+        example = {
+            'input_ids': torch.tensor(data['input_ids'], dtype=torch.long),
+            'attention_mask': torch.tensor(data['input_ids'], dtype=torch.long),
+            'token_type_ids': torch.tensor(data['token_type_ids'], dtype=torch.long),
+            'start_positions': torch.tensor(data['tok_start_idx'], dtype=torch.long),
+            'end_positions': torch.tensor(data['tok_end_idx'], dtype=torch.long)
+        }
+
+        if not self.evaluate:
+            return example
+        else:
+            example.update({
+                'offsets': torch.tensor(data['text_offsets'], dtype=torch.long),
+                'orig_selected_text': data['selected_text'],
+                'sentiment': data['sentiment'],
+                'orig_text': data['text'],
+                'example_id': self.example_ids[item]
+            })
+        return example
+
+    def __len__(self):
+        return len(self.sentiments)
+
+
+def load_examples(args, tokenizer, evaluate):
+    filename = args.predict_file if evaluate else args.train_file
+    df = pd.read_csv(os.path.join(args.data_dir, filename))
+    texts = df.text.tolist()
+    selected_texts = df.selected_text.tolist()
+    sentiments = df.sentiment.tolist()
+    ids = df.textID.tolist()
+    dataset = TweetData(tokenizer, ids, texts, sentiments, selected_texts, args.max_seq_length, evaluate)
+    return dataset
+
+
+def get_jaccard_and_pred_ans(start_idx, end_idx, offsets, orig_text, orig_selected_text, sentiment):
+    pred_selected_text = ''
+    if start_idx > end_idx:
+        end_idx = start_idx
+
+    for idx in range(start_idx, end_idx + 1):
+        token = orig_text[offsets[idx][0]: offsets[idx][1]]
+        pred_selected_text += token
+        if idx + 1 < len(offsets) and offsets[idx + 1][0] > offsets[idx][1]:
+            pred_selected_text += ' '
+
+    if sentiment == 'neutral' or len(orig_text.split()) < 2:
+        pred_selected_text = orig_text
+
+    jaccard_score = compute_jaccard(orig_selected_text, pred_selected_text)
+
+    return pred_selected_text, jaccard_score
+
+
+if __name__ == '__main__':
+    from tokenizers import ByteLevelBPETokenizer
+    import argparse
+
+    tokenizer = ByteLevelBPETokenizer(vocab_file='../models/roberta-base/vocab.json',
+                                      merges_file='../models/roberta-base/merges.txt',
+                                      add_prefix_space=True,
+                                      lowercase=True)
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument('--train_file', default='debug_train.csv', type=str)
+    # parser.add_argument('--predict_file', default='debug_valid.csv', type=str)
+    # parser.add_argument('--data_dir', default='../data/', type=str)
+    # parser.add_argument('--max_seq_length', default=180, type=int)
+    # args = parser.parse_args()
+    #
+    # dataset = load_examples(args, tokenizer)
+    # print(dataset[4])
+    print(tokenizer.encode('positive negative neutral').ids)
+
+# TODO 得到 token 就使用 strip split 就行
+# TODO 原方法对 neutral 答案直接使用原文 —— 有效，对 main
+# main1 使用了上述改进仍没有起色，logit 变成 softmax 之后也不行
+# 884 行改成一样也没起色

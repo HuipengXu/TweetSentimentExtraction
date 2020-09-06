@@ -3,19 +3,21 @@ from transformers import (
     RobertaModel,
     BertModel,
     AlbertModel,
-    BertLMHeadModel
+    BertLMHeadModel,
+    # BertForQuestionAnswering
 )
 import torch.nn as nn
 import torch
+
 
 class RobertaForQuestionAnswering(BertPreTrainedModel):
 
     def __init__(self, config):
         super(RobertaForQuestionAnswering, self).__init__(config)
         self.roberta = RobertaModel(config)
-        self.fc = nn.Linear(768 * 2, 2)
+        self.fc = nn.Linear(config.hidden_size * 2, 2)
 
-    def forward(self, input_ids, attention_mask, start_positions, end_positions):
+    def forward(self, input_ids, attention_mask, start_positions=None, end_positions=None):
         _, _, hidden_states = self.roberta(input_ids, attention_mask)
         out = torch.cat([hidden_states[-1], hidden_states[-1]], dim=-1)
         logits = self.fc(out)
@@ -51,10 +53,11 @@ class BertForQuestionAnswering(BertPreTrainedModel):
     def __init__(self, config):
         super(BertForQuestionAnswering, self).__init__(config)
         self.bert = BertModel(config)
-        self.fc = nn.Linear(768 * 2, 2)
+        self.fc = nn.Linear(config.hidden_size * 2, 2)
 
-    def forward(self, input_ids, attention_mask, start_positions, end_positions):
-        _, _, hidden_states = self.bert(input_ids, attention_mask)
+    def forward(self, input_ids, attention_mask, token_type_ids,
+                start_positions=None, end_positions=None):
+        _, _, hidden_states = self.bert(input_ids, attention_mask, token_type_ids)
         out = torch.cat([hidden_states[-1], hidden_states[-1]], dim=-1)
         logits = self.fc(out)
 
@@ -89,10 +92,11 @@ class AlbertForQuestionAnswering(BertPreTrainedModel):
     def __init__(self, config):
         super(AlbertForQuestionAnswering, self).__init__(config)
         self.albert = AlbertModel(config)
-        self.fc = nn.Linear(768 * 2, 2)
+        self.fc = nn.Linear(1024 * 2, 2)
 
-    def forward(self, input_ids, attention_mask, start_positions, end_positions):
-        _, _, hidden_states = self.albert(input_ids, attention_mask)
+    def forward(self, input_ids, attention_mask, token_type_ids,
+                start_positions=None, end_positions=None):
+        _, _, hidden_states = self.albert(input_ids, attention_mask, token_type_ids)
         out = torch.cat([hidden_states[-1], hidden_states[-1]], dim=-1)
         logits = self.fc(out)
 
@@ -129,7 +133,7 @@ class BertweetForQuestionAnswering(BertPreTrainedModel):
         self.bertweet = BertLMHeadModel(config)
         self.fc = nn.Linear(768 * 2, 2)
 
-    def forward(self, input_ids, attention_mask, start_positions, end_positions):
+    def forward(self, input_ids, attention_mask, start_positions=None, end_positions=None):
         _, _, hidden_states = self.bertweet(input_ids, attention_mask)
         out = torch.cat([hidden_states[-1], hidden_states[-1]], dim=-1)
         logits = self.fc(out)
@@ -165,9 +169,11 @@ class QuestionAnswering:
     def __call__(self, model_type):
         if model_type == 'roberta':
             return RobertaForQuestionAnswering
-        elif model_type == 'bert':
-            return BertModel
+        elif model_type.startswith('bert'):
+            if model_type == 'bert':
+                return BertForQuestionAnswering
+            elif model_type == 'bertweet':
+                return BertweetForQuestionAnswering
         elif model_type == 'albert':
             return AlbertForQuestionAnswering
-        elif model_type == 'bertweet':
-            return BertweetForQuestionAnswering
+
