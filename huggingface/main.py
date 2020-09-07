@@ -677,7 +677,7 @@ def main():
     )
 
     parser.add_argument("--logging_step_ratio", type=float, default=0.1, help="Log every X updates steps.")
-    parser.add_argument("--save_steps", type=int, default=100, help="Log every X updates steps.")
+    parser.add_argument("--save_steps", type=int, default=50, help="Log every X updates steps.")
     parser.add_argument(
         "--eval_all_checkpoints",
         action="store_true",

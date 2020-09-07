@@ -827,7 +827,8 @@ def process_data(tokenizer, text, selected_text, sentiment, max_length):
 
 class TweetData(Dataset):
 
-    def __init__(self, tokenizer, example_ids, texts, sentiments, selected_texts, max_length=128, evaluate=False):
+    def __init__(self, tokenizer, example_ids, texts, sentiments,
+                 selected_texts, max_length=128, evaluate=False):
         super(TweetData, self).__init__()
         self.tokenizer = tokenizer
         self.example_ids = example_ids
@@ -845,7 +846,7 @@ class TweetData(Dataset):
                             self.max_length)
         example = {
             'input_ids': torch.tensor(data['input_ids'], dtype=torch.long),
-            'attention_mask': torch.tensor(data['input_ids'], dtype=torch.long),
+            'attention_mask': torch.tensor(data['attention_mask'], dtype=torch.long),
             'token_type_ids': torch.tensor(data['token_type_ids'], dtype=torch.long),
             'start_positions': torch.tensor(data['tok_start_idx'], dtype=torch.long),
             'end_positions': torch.tensor(data['tok_end_idx'], dtype=torch.long)
@@ -881,7 +882,9 @@ def load_examples(args, tokenizer, evaluate):
 def get_jaccard_and_pred_ans(start_idx, end_idx, offsets, orig_text, orig_selected_text, sentiment):
     pred_selected_text = ''
     if start_idx > end_idx:
-        end_idx = start_idx
+        # end_idx = start_idx
+        jaccard_score = 1. if len(orig_selected_text) == 0 else 0.
+        return pred_selected_text, jaccard_score
 
     for idx in range(start_idx, end_idx + 1):
         token = orig_text[offsets[idx][0]: offsets[idx][1]]
@@ -899,6 +902,7 @@ def get_jaccard_and_pred_ans(start_idx, end_idx, offsets, orig_text, orig_select
 
 if __name__ == '__main__':
     from tokenizers import ByteLevelBPETokenizer
+    import pandas as pd
     import argparse
 
     tokenizer = ByteLevelBPETokenizer(vocab_file='../models/roberta-base/vocab.json',
@@ -914,7 +918,12 @@ if __name__ == '__main__':
     #
     # dataset = load_examples(args, tokenizer)
     # print(dataset[4])
-    print(tokenizer.encode('positive negative neutral').ids)
+    train_df = pd.read_csv('../data/clean_train.csv')
+    max_length = 0
+    for text in train_df.text.tolist():
+        max_length = max(len(tokenizer.encode(text).ids), max_length)
+    print(max_length+5)
+    # max length 105
 
 # TODO 得到 token 就使用 strip split 就行
 # TODO 原方法对 neutral 答案直接使用原文 —— 有效，对 main

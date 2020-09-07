@@ -92,12 +92,14 @@ class AlbertForQuestionAnswering(BertPreTrainedModel):
     def __init__(self, config):
         super(AlbertForQuestionAnswering, self).__init__(config)
         self.albert = AlbertModel(config)
-        self.fc = nn.Linear(1024 * 2, 2)
+        self.fc = nn.Linear(config.hidden_size * 2, 2)
+        self.dropout = nn.Dropout(0.1)
 
     def forward(self, input_ids, attention_mask, token_type_ids,
                 start_positions=None, end_positions=None):
         _, _, hidden_states = self.albert(input_ids, attention_mask, token_type_ids)
         out = torch.cat([hidden_states[-1], hidden_states[-1]], dim=-1)
+        out = self.dropout(out)
         logits = self.fc(out)
 
         start_logits, end_logits = logits.split(1, dim=-1)
