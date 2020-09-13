@@ -8,6 +8,8 @@ models/
 allen/run/
 huggingface/results/
 huggingface/results1/
+huggingface/first_level_models/
+huggingface/char_level_results/
 
 huggingface/__pycache__/
 allen/__pycache__/

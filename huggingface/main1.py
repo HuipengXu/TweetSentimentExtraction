@@ -28,6 +28,7 @@ from utils import load_examples, get_jaccard_and_pred_ans
 
 import numpy as np
 import torch
+from torch.optim.swa_utils import AveragedModel, SWALR
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
@@ -43,7 +44,7 @@ from transformers import (
     squad_convert_examples_to_features,
 )
 
-from tokenizers import ByteLevelBPETokenizer, Tokenizer
+from tokenizers import ByteLevelBPETokenizer, Tokenizer, BertWordPieceTokenizer
 
 from model import QuestionAnswering
 
@@ -220,7 +221,7 @@ def train(args, train_dataset, model, tokenizer):
             # outputs = model(**inputs)
             # # model outputs are always tuple in transformers (see doc)
             # loss = outputs[0]
-            loss = model(**inputs)
+            loss = model(**inputs, use_jaccard_soft=args.use_jaccard_soft)
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel (not distributed) training
@@ -264,7 +265,7 @@ def train(args, train_dataset, model, tokenizer):
                     model_to_save = model.module if hasattr(model, "module") else model
                     if not os.path.exists(output_dir): os.mkdir(output_dir)
                     model_to_save.save_pretrained(output_dir)
-                    tokenizer_file = os.path.join(output_dir, 'bpe.tokenizer.json')
+                    tokenizer_file = os.path.join(output_dir, 'tokenizer.json')
                     tokenizer.save(tokenizer_file)
 
                     torch.save(args, os.path.join(output_dir, "training_args.bin"))
@@ -367,7 +368,7 @@ def evaluate(args, model, tokenizer, do_test=False, prefix=""):
                 example_id_jaccard_map.append((example_id, jaccard_score))
                 all_jaccards.append(jaccard_score)
 
-    avg_jaccard_score = sum(all_jaccards) / len(all_jaccards)
+    avg_jaccard_score = sum(all_jaccards) / len(all_jaccards) * 100
     example_id_jaccard_map.sort(key=lambda x: x[1])
     topk_bad_cases = {id_: all_results[id_] for id_, _ in example_id_jaccard_map[:args.topk]}
     bad_cases_file = os.path.join(args.output_dir, f'bad_cases_{prefix}.json')
@@ -511,6 +512,13 @@ def main():
         "--num_train_epochs", default=6.0, type=float, help="Total number of training epochs to perform."
     )
     parser.add_argument(
+        "--alpha",
+        default=0.3,
+        type=float,
+        help="used in jaccard-based soft labels"
+    )
+    parser.add_argument("--use_jaccard_soft", action="store_true", help="whether to use jaccard-based soft labels.")
+    parser.add_argument(
         "--max_steps",
         default=-1,
         type=int,
@@ -531,7 +539,7 @@ def main():
     )
 
     parser.add_argument("--logging_step_ratio", type=float, default=0.1, help="Log every X updates steps.")
-    parser.add_argument("--save_steps", type=int, default=100, help="Log every X updates steps.")
+    parser.add_argument("--save_steps", type=int, default=50, help="Log every X updates steps.")
     parser.add_argument(
         "--eval_all_checkpoints",
         action="store_true",
@@ -614,12 +622,19 @@ def main():
         cache_dir=args.cache_dir if args.cache_dir else None,
         output_hidden_states=True,
     )
-    tokenizer = ByteLevelBPETokenizer(
-        vocab_file=os.path.join(args.model_name_or_path, 'vocab.json'),
-        merges_file=os.path.join(args.model_name_or_path, 'merges.txt'),
-        add_prefix_space=True,
-        lowercase=True
-    )
+    if args.model_type == 'roberta':
+        tokenizer = ByteLevelBPETokenizer(
+            vocab_file=os.path.join(args.model_name_or_path, 'vocab.json'),
+            merges_file=os.path.join(args.model_name_or_path, 'merges.txt'),
+            add_prefix_space=True,
+            lowercase=args.do_lower_case
+        )
+    elif args.model_type == 'bert':
+        tokenizer = BertWordPieceTokenizer(
+            vocab_file=os.path.join(args.model_name_or_path, 'vocab.txt'),
+            lowercase=args.do_lower_case
+
+        )
     model = QuestionAnswering()(args.model_type).from_pretrained(
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
@@ -664,7 +679,7 @@ def main():
         model_to_save = model.module if hasattr(model, "module") else model
         if not os.path.exists(output_dir): os.mkdir(output_dir)
         model_to_save.save_pretrained(output_dir)
-        tokenizer_file = os.path.join(output_dir, 'bpe.tokenizer.json')
+        tokenizer_file = os.path.join(output_dir, 'tokenizer.json')
         tokenizer.save(tokenizer_file)
 
         # Good practice: save your training arguments together with the trained model

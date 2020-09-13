@@ -5,14 +5,25 @@ import logging
 import math
 import json
 import os
+import timeit
+from tqdm import tqdm
+import pickle
 
 import numpy as np
 import pandas as pd
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+
+from tensorflow.keras.preprocessing.text import Tokenizer as KTokenizer
+from tokenizers import Tokenizer as TTokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.preprocessing.text import Tokenizer
 
 from transformers.tokenization_bert import BasicTokenizer
+from transformers import AutoConfig
+
+from model import QuestionAnswering
 
 logger = logging.getLogger(__name__)
 
@@ -764,16 +775,74 @@ def compute_predictions_log_probs(
     return all_predictions
 
 
+def one_hot(idx, seq_len):
+    idxs = [0.] * seq_len
+    idxs[idx] = 1.
+    return idxs
+
+
+def jaccard_based_soft_labels(alpha, tok_text_length, orig_start, orig_end, tok_selected_text_ids_str, tok_text_ids,
+                              example_id, add_square_item=True):
+    jaccard_start_scores = []
+    jaccard_end_scores = []
+    orig_starts = one_hot(orig_start, tok_text_length)
+    orig_ends = one_hot(orig_end, tok_text_length)
+
+    for i in range(tok_text_length):
+        jaccard_start_score = compute_jaccard(tok_selected_text_ids_str,
+                                              ' '.join(str(id_) for id_ in tok_text_ids[i: orig_end + 1]))
+        jaccard_end_score = compute_jaccard(tok_selected_text_ids_str,
+                                            ' '.join(str(id_) for id_ in tok_text_ids[orig_start: i]))
+        if add_square_item:
+            jaccard_start_score += jaccard_start_score ** 2
+            jaccard_end_score += jaccard_end_score ** 2
+        jaccard_start_scores.append(jaccard_start_score)
+        jaccard_end_scores.append(jaccard_end_score)
+
+    total_jaccard_start_score = sum(jaccard_start_scores)
+    total_jaccard_end_score = sum(jaccard_end_scores)
+
+    soft_start_labels = []
+    soft_end_labels = []
+    for i, (jaccard_start_score, jaccard_end_score) in enumerate(
+            zip(jaccard_start_scores, jaccard_end_scores)):
+        try:
+            soft_start_label = alpha * orig_starts[i] + (1 - alpha) * jaccard_start_score / total_jaccard_start_score
+            soft_start_labels.append(soft_start_label)
+            soft_end_label = alpha * orig_ends[i] + (1 - alpha) * jaccard_end_score / total_jaccard_end_score
+            soft_end_labels.append(soft_end_label)
+        except ZeroDivisionError:
+            print(example_id)
+
+    soft_start_labels = np.array(soft_start_labels)
+    soft_start_labels /= soft_start_labels.sum()
+    soft_end_labels = np.array(soft_end_labels)
+    soft_end_labels /= soft_end_labels.sum()
+
+    return soft_start_labels, soft_end_labels
+
+
 # TODO 用自己的方法试试，对 text 和 selected_text 同时 tokenize，然后在 text 中 find
-def process_data(tokenizer, text, selected_text, sentiment, max_length):
-    text = ' ' + ' '.join(str(text).split())
-    selected_text = ' ' + ' '.join(str(selected_text).split())
+def process_data(tokenizer, text, selected_text, extended_selected_text, sentiment, example_id,
+                 model_type, max_length, alpha=1., use_jaccard_soft=False):
+    text = ' '.join(str(text).split())
+    selected_text = ' '.join(str(selected_text).split())
+    if model_type == 'roberta':
+        text = ' ' + text
+        selected_text = ' ' + selected_text
+    selected_text_length = len(selected_text)
 
     start_idx = end_idx = None
     for i, c in enumerate(text):
-        if c == selected_text[1] and ' ' + text[i: i + len(selected_text) - 1] == selected_text:
+        if model_type == 'roberta' and c == selected_text[1] and \
+                ' ' + text[i: i + selected_text_length - 1] == selected_text:
             start_idx = i
-            end_idx = i + len(selected_text) - 2
+            end_idx = i + selected_text_length - 2
+            break
+        elif model_type == 'bert' and c == selected_text[0] and \
+                text[i: i + selected_text_length] == selected_text:
+            start_idx = i
+            end_idx = i + selected_text_length - 1
             break
 
     char_targets = np.zeros(len(text))
@@ -781,8 +850,12 @@ def process_data(tokenizer, text, selected_text, sentiment, max_length):
         char_targets[start_idx: end_idx + 1] = 1
 
     tok_text = tokenizer.encode(text)
-    input_ids_orig = tok_text.ids
-    text_offsets = tok_text.offsets
+    if model_type == 'roberta':
+        input_ids_orig = tok_text.ids
+        text_offsets = tok_text.offsets
+    elif model_type == 'bert':
+        input_ids_orig = tok_text.ids[1:-1]
+        text_offsets = tok_text.offsets[1:-1]
 
     target_idxs = []
     for i, (offset1, offset2) in enumerate(text_offsets):
@@ -792,17 +865,30 @@ def process_data(tokenizer, text, selected_text, sentiment, max_length):
     tok_start_idx = target_idxs[0]
     tok_end_idx = target_idxs[-1]
 
-    sentiment_id = {'positive': 1313, 'negative': 2430, 'neutral': 7974}
-    input_ids = [0] + [sentiment_id[sentiment]] + [2] + [2] + input_ids_orig + [2]
-    token_type_ids = [0] * len(input_ids)
+    if model_type == 'roberta':
+        sentiment_id = {'positive': 1313, 'negative': 2430, 'neutral': 7974}
+        input_ids = [0] + [sentiment_id[sentiment]] + [2] + [2] + input_ids_orig + [2]
+        text_offsets = [(0, 0)] * 4 + text_offsets + [(0, 0)]  # 0 用来表示特殊符号的范围，比如 <s></s>，(0, 0) 表示不可用
+        token_type_ids = [0] * len(input_ids)
+        tok_start_idx += 4
+        tok_end_idx += 4
+    elif model_type == 'bert':
+        sentiment_id = {'positive': 3112, 'negative': 4366, 'neutral': 8795}
+        input_ids = [101] + [sentiment_id[sentiment]] + [102] + input_ids_orig + [102]
+        token_type_ids = [0] * 3 + [1] * (len(input_ids_orig) + 1)
+        text_offsets = [(0, 0)] * 3 + text_offsets + [(0, 0)]
+        tok_start_idx += 3
+        tok_end_idx += 3
+
     attention_mask = [1] * len(input_ids)
-    text_offsets = [(0, 0)] * 4 + text_offsets + [(0, 0)]  # 0 用来表示特殊符号的范围，比如 <s></s>，(0, 0) 表示不可用
-    tok_start_idx += 4
-    tok_end_idx += 4
 
     padding_length = max_length - len(input_ids)
     if padding_length > 0:
-        input_ids += [1] * padding_length
+        if model_type == 'roberta':
+            pad_id = 1
+        elif model_type == 'bert':
+            pad_id = 0
+        input_ids += [pad_id] * padding_length
         attention_mask += [0] * padding_length
         token_type_ids += [0] * padding_length
         text_offsets += [(0, 0)] * padding_length
@@ -811,8 +897,10 @@ def process_data(tokenizer, text, selected_text, sentiment, max_length):
         attention_mask = attention_mask[:max_length]
         token_type_ids = token_type_ids[:max_length]
         text_offsets = text_offsets[:max_length]
+        tok_end_idx = min(tok_end_idx, max_length - 1)
+        tok_start_idx = min(tok_start_idx, max_length - 1)
 
-    return {
+    data = {
         'input_ids': input_ids,
         'attention_mask': attention_mask,
         'token_type_ids': token_type_ids,
@@ -824,32 +912,55 @@ def process_data(tokenizer, text, selected_text, sentiment, max_length):
         'tok_end_idx': tok_end_idx
     }
 
+    if use_jaccard_soft:
+        tok_selected_text_ids = tokenizer.encode(extended_selected_text).ids
+        tok_selected_text_ids_str = ' '.join(str(id_) for id_ in tok_selected_text_ids)
+        soft_start_labels, soft_end_labels = jaccard_based_soft_labels(
+            alpha, len(input_ids), tok_start_idx, tok_end_idx, tok_selected_text_ids_str, input_ids, example_id
+        )
+        data.update({
+            'tok_start_idx': soft_start_labels,
+            'tok_end_idx': soft_end_labels
+        })
+
+    return data
+
 
 class TweetData(Dataset):
 
-    def __init__(self, tokenizer, example_ids, texts, sentiments,
-                 selected_texts, max_length=128, evaluate=False):
+    def __init__(self, tokenizer, example_ids, texts, sentiments, selected_texts, extended_selected_texts,
+                 model_type, max_length=128, evaluate=False, alpha=1., use_jaccard_soft=False):
         super(TweetData, self).__init__()
         self.tokenizer = tokenizer
         self.example_ids = example_ids
         self.texts = texts
         self.sentiments = sentiments
         self.selected_texts = selected_texts
+        self.extended_selected_texts = extended_selected_texts
+        self.model_type = model_type
         self.max_length = max_length
         self.evaluate = evaluate
+        self.use_jaccard_soft = use_jaccard_soft
+        self.alpha = alpha
 
     def __getitem__(self, item):
         data = process_data(self.tokenizer,
                             self.texts[item],
                             self.selected_texts[item],
+                            self.extended_selected_texts[item],
                             self.sentiments[item],
-                            self.max_length)
+                            self.example_ids[item],
+                            self.model_type,
+                            self.max_length,
+                            self.alpha,
+                            self.use_jaccard_soft)
+        target_dtype = torch.float if self.use_jaccard_soft else torch.long
         example = {
             'input_ids': torch.tensor(data['input_ids'], dtype=torch.long),
             'attention_mask': torch.tensor(data['attention_mask'], dtype=torch.long),
             'token_type_ids': torch.tensor(data['token_type_ids'], dtype=torch.long),
-            'start_positions': torch.tensor(data['tok_start_idx'], dtype=torch.long),
-            'end_positions': torch.tensor(data['tok_end_idx'], dtype=torch.long)
+            'start_positions': torch.tensor(data['tok_start_idx'], dtype=target_dtype),
+            'end_positions': torch.tensor(data['tok_end_idx'], dtype=target_dtype)
         }
 
         if not self.evaluate:
@@ -870,38 +981,201 @@ class TweetData(Dataset):
 
 def load_examples(args, tokenizer, evaluate):
     filename = args.predict_file if evaluate else args.train_file
+    if evaluate: args.use_jaccard_soft = False
     df = pd.read_csv(os.path.join(args.data_dir, filename))
     texts = df.text.tolist()
     selected_texts = df.selected_text.tolist()
+    extended_selected_texts = df.extended_selected_text.tolist()
     sentiments = df.sentiment.tolist()
     ids = df.textID.tolist()
-    dataset = TweetData(tokenizer, ids, texts, sentiments, selected_texts, args.max_seq_length, evaluate)
+    dataset = TweetData(tokenizer, ids, texts, sentiments, selected_texts, extended_selected_texts,
+                        args.model_type, args.max_seq_length, evaluate, args.alpha, args.use_jaccard_soft)
     return dataset
 
 
 def get_jaccard_and_pred_ans(start_idx, end_idx, offsets, orig_text, orig_selected_text, sentiment):
     pred_selected_text = ''
-    if start_idx > end_idx:
-        # end_idx = start_idx
-        jaccard_score = 1. if len(orig_selected_text) == 0 else 0.
-        return pred_selected_text, jaccard_score
 
-    for idx in range(start_idx, end_idx + 1):
-        token = orig_text[offsets[idx][0]: offsets[idx][1]]
-        pred_selected_text += token
-        if idx + 1 < len(offsets) and offsets[idx + 1][0] > offsets[idx][1]:
-            pred_selected_text += ' '
-
-    if sentiment == 'neutral' or len(orig_text.split()) < 2:
+    if sentiment == 'neutral' or len(orig_text.split()) < 2 or start_idx > end_idx:
         pred_selected_text = orig_text
+
+    elif offsets is not None:
+        for idx in range(start_idx, end_idx + 1):
+            token = orig_text[offsets[idx][0]: offsets[idx][1]]
+            pred_selected_text += token
+            if idx + 1 < len(offsets) and offsets[idx + 1][0] > offsets[idx][1]:
+                pred_selected_text += ' '
+    else:
+        pred_selected_text = orig_text[start_idx: end_idx + 1]
 
     jaccard_score = compute_jaccard(orig_selected_text, pred_selected_text)
 
     return pred_selected_text, jaccard_score
 
 
+######################### 2nd level model #########################
+class CharDataset(Dataset):
+
+    def __init__(self, tokenizer, example_ids, texts, sentiments, selected_texts, extended_selected_texts,
+                 start_end_probs, offsets, max_length=128, evaluate=False, alpha=1., use_jaccard_soft=False):
+        self.tokenizer = tokenizer
+        self.example_ids = example_ids
+        self.texts = texts
+        self.char_ids = pad_sequences(self.tokenizer.texts_to_sequences(texts),
+                                      maxlen=max_length, padding='post', truncating='post')
+        self.sentiments = sentiments
+        self.sentiment2id = {'neutral': 0, 'positive': 1, 'negative': 2}
+        self.selected_texts = selected_texts
+        self.extended_selected_texts = extended_selected_texts
+        self.start_end_probs = start_end_probs
+        self.offsets = offsets
+        self.evaluate = evaluate
+        self.use_jaccard_soft = use_jaccard_soft
+        self.alpha = alpha
+
+    def __len__(self):
+        return len(self.sentiments)
+
+    def __getitem__(self, item):
+        example_id = self.example_ids[item]
+        text = self.texts[item]
+        offsets = self.offsets[example_id]
+        selected_text = self.selected_texts[item]
+        start_end_probs = self.start_end_probs[example_id]
+        char_ids = self.char_ids[item]
+        char_start_probs = np.zeros(len(char_ids))
+        char_end_probs = np.zeros(len(char_ids))
+        for i, (offset1, offset2) in enumerate(offsets):
+            if offset1 or offset2:  # 全零，不赋予概率
+                char_start_probs[offset1: offset2] = start_end_probs[i, 0]
+                char_end_probs[offset1: offset2] = start_end_probs[i, 1]
+
+        sentiment_id = self.sentiment2id[self.sentiments[item]]
+
+        start_position = end_position = None
+        for i, ch in enumerate(text):
+            if ch == selected_text[0] and text[i: i + len(selected_text)] == selected_text:
+                start_position = i
+                end_position = i + len(selected_text) - 1
+                break
+        assert selected_text == text[start_position: end_position + 1], \
+            f'"{text[start_position: end_position + 1]}" instead of "{selected_text}" in "{text}"'
+
+        data = {
+            'start_probs': torch.tensor(char_start_probs, dtype=torch.float),
+            'end_probs': torch.tensor(char_end_probs, dtype=torch.float),
+            'char_ids': torch.tensor(char_ids, dtype=torch.long),
+            'sentiment_ids': torch.tensor(sentiment_id, dtype=torch.long),
+        }
+
+        if self.evaluate:
+            data.update({
+                'sentiment': self.sentiments[item],
+                'orig_selected_text': selected_text,
+                'orig_text': text,
+                'example_id': example_id
+            })
+        else:
+            data.update({
+                'start_positions': torch.tensor(start_position, dtype=torch.long),
+                'end_positions': torch.tensor(end_position, dtype=torch.long)
+            })
+        return data
+
+
+def first_level_inference(model_path, data_type):
+    args = torch.load(os.path.join(model_path, 'training_args.bin'))
+    # args.train_file = 'debug_train.csv'
+    # args.predict_file = 'debug_valid.csv'
+    if data_type == 'train': args.predict_file = args.train_file
+    tokenizer = TTokenizer.from_file(os.path.join(model_path, 'bpe.tokenizer.json'))
+    model = QuestionAnswering()(args.model_type).from_pretrained(model_path).to(args.device)
+    dataset = load_examples(args, tokenizer, evaluate=True)
+    batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=12)
+    # multi-gpu evaluate
+    if args.n_gpu > 1 and not isinstance(model, torch.nn.DataParallel):
+        model = torch.nn.DataParallel(model)
+
+    # Eval!
+    logger.info(f"***** Running inference on {data_type} data *****")
+    logger.info("  Num examples = %d", len(dataset))
+    logger.info("  Batch size = %d", batch_size)
+
+    start_end_probs = {}
+    offsets = {}
+    all_jaccards = []
+    start_time = timeit.default_timer()
+
+    for batch in tqdm(dataloader, desc="inference"):
+        model.eval()
+        batch_for_forward = tuple(t.to(args.device) for _, t in list(batch.items())[:3])
+
+        with torch.no_grad():
+            inputs = {
+                "input_ids": batch_for_forward[0],
+                "attention_mask": batch_for_forward[1],
+                "token_type_ids": batch_for_forward[2],
+            }
+
+            if args.model_type in ["xlm", "roberta", "distilbert", "camembert", "bart"]:
+                del inputs["token_type_ids"]
+
+            start_logits, end_logits = model(**inputs)
+            start_probs = torch.softmax(start_logits, dim=-1)
+            end_probs = torch.softmax(end_logits, dim=-1)
+            start_idxs = start_probs.argmax(dim=-1)
+            end_idxs = end_probs.argmax(dim=-1)
+            probs = torch.stack([start_probs, end_probs], dim=-1).cpu().numpy()
+            for i in range(len(batch['orig_text'])):
+                orig_text = batch['orig_text'][i]
+                orig_selected_text = batch['orig_selected_text'][i]
+                sentiment = batch['sentiment'][i]
+                example_id = batch['example_id'][i]
+                offset = batch['offsets'][i]
+                _, jaccard_score = get_jaccard_and_pred_ans(start_idxs[i], end_idxs[i],
+                                                            offset, orig_text,
+                                                            orig_selected_text,
+                                                            sentiment)
+                start_end_probs.update({example_id: probs[i]})
+                offsets.update({example_id: offset})
+                all_jaccards.append(jaccard_score)
+
+    avg_jaccard_score = sum(all_jaccards) / len(all_jaccards) * 100
+
+    evalTime = timeit.default_timer() - start_time
+    logger.info("  Evaluation done in total %f secs (%f sec per example)", evalTime, evalTime / len(dataset))
+    logger.info(f"Result: {avg_jaccard_score:.5f}")
+
+    with open(os.path.join(model_path, f'{data_type}_start_end_probs.pickle'), 'wb') as f:
+        pickle.dump(start_end_probs, f)
+
+    with open(os.path.join(model_path, f'{data_type}_offsets.pickle'), 'wb') as f:
+        pickle.dump(offsets, f)
+
+
+def load_char_level_examples(args, tokenizer, evaluate):
+    filename = args.predict_file if evaluate else args.train_file
+    df = pd.read_csv(os.path.join(args.data_dir, filename))
+    example_ids = df.textID.tolist()
+    texts = df.text.tolist()
+    sentiments = df.sentiment.tolist()
+    selected_texts = df.selected_text.tolist()
+    extended_selected_texts = df.extended_selected_text.tolist()
+    data_type = 'train' if not evaluate else 'valid'
+    with open(os.path.join(args.first_level_model, f'{data_type}_start_end_probs.pickle'), 'rb') as f:
+        start_end_probs = pickle.load(f)
+    with open(os.path.join(args.first_level_model, f'{data_type}_offsets.pickle'), 'rb') as f:
+        offsets = pickle.load(f)
+    dataset = CharDataset(
+        tokenizer, example_ids, texts, sentiments, selected_texts, extended_selected_texts,
+        start_end_probs, offsets, args.max_seq_length, evaluate, args.alpha, args.use_jaccard_soft
+    )
+    return dataset
+
+
 if __name__ == '__main__':
-    from tokenizers import ByteLevelBPETokenizer
+    from tokenizers import ByteLevelBPETokenizer, BertWordPieceTokenizer
     import pandas as pd
     import argparse
 
@@ -909,23 +1183,55 @@ if __name__ == '__main__':
                                       merges_file='../models/roberta-base/merges.txt',
                                       add_prefix_space=True,
                                       lowercase=True)
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument('--train_file', default='debug_train.csv', type=str)
-    # parser.add_argument('--predict_file', default='debug_valid.csv', type=str)
-    # parser.add_argument('--data_dir', default='../data/', type=str)
-    # parser.add_argument('--max_seq_length', default=180, type=int)
-    # args = parser.parse_args()
+    # tokenizer = BertWordPieceTokenizer(
+    #     vocab_file=os.path.join('../models/bert-base-cased', 'vocab.txt'),
+    #     lowercase=False
+    # )
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--train_file', default='debug_train.csv', type=str)
+    parser.add_argument('--model_type', default='roberta', type=str)
+    parser.add_argument('--predict_file', default='debug_valid.csv', type=str)
+    parser.add_argument('--data_dir', default='../data/', type=str)
+    parser.add_argument('--max_seq_length', default=180, type=int)
+    parser.add_argument(
+        "--alpha",
+        default=0.3,
+        type=float,
+        help="used in jaccard-based soft labels"
+    )
+    parser.add_argument("--use_jaccard_soft", action="store_false", help="whether to use jaccard-based soft labels.")
+    args = parser.parse_args()
+    args.first_level_model = './first_level_models/roberta-base-last2h-conv/'
+    tokenizer = Tokenizer(num_words=None, char_level=True, oov_token='UNK', lower=True)
+    train_texts = pd.read_csv(os.path.join(args.data_dir, args.train_file)).text.tolist()
+    tokenizer.fit_on_texts(train_texts)
+    args.vocab_size = len(tokenizer.word_index) + 1
+
+    train_dataset = load_char_level_examples(args, tokenizer, False)
     #
     # dataset = load_examples(args, tokenizer)
     # print(dataset[4])
-    train_df = pd.read_csv('../data/clean_train.csv')
-    max_length = 0
-    for text in train_df.text.tolist():
-        max_length = max(len(tokenizer.encode(text).ids), max_length)
-    print(max_length+5)
+    # train_df = pd.read_csv('../data/clean_train.csv')
+    # max_length = 0
+    # for text in train_df.text.tolist():
+    #     max_length = max(len(tokenizer.encode(text).ids), max_length)
+    # print(max_length + 5)
     # max length 105
+    # train_dataset = load_examples(args, tokenizer, evaluate=False)
+    from torch.utils.data import DataLoader
 
-# TODO 得到 token 就使用 strip split 就行
-# TODO 原方法对 neutral 答案直接使用原文 —— 有效，对 main
-# main1 使用了上述改进仍没有起色，logit 变成 softmax 之后也不行
-# 884 行改成一样也没起色
+    dataloader = DataLoader(train_dataset, shuffle=True, batch_size=32)
+    for batch in dataloader:
+        print('hah')
+    # train_df = pd.read_csv('../data/debug_train.csv')
+    # text = train_df.text.tolist()
+    # tokenizer = KTokenizer(num_words=None, char_level=True, oov_token='UNK', lower=True)
+    # tokenizer.fit_on_texts(text)
+    # ids = tokenizer.texts_to_sequences(['you are so beautiful'])
+    # print(len(ids[0]))
+    # print(len('you are so beautiful'))
+    # print(ids)
+
+
+
+

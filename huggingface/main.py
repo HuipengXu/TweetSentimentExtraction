@@ -881,3 +881,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# TODO 修改损失函数为 KL 散度以适应 soft labels
