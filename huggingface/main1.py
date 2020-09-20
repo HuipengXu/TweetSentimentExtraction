@@ -22,9 +22,10 @@ import os
 import re
 import json
 import random
+import gc
 import timeit
 
-from utils import load_examples, get_jaccard_and_pred_ans
+from utils import load_examples, get_jaccard_and_pred_ans, SentencePieceTokenizer
 
 import numpy as np
 import torch
@@ -44,7 +45,12 @@ from transformers import (
     squad_convert_examples_to_features,
 )
 
-from tokenizers import ByteLevelBPETokenizer, Tokenizer, BertWordPieceTokenizer
+from tokenizers import (
+    ByteLevelBPETokenizer,
+    Tokenizer,
+    BertWordPieceTokenizer,
+    SentencePieceBPETokenizer
+)
 
 from model import QuestionAnswering
 
@@ -79,8 +85,7 @@ def set_seed(args):
 def to_list(tensor):
     return tensor.detach().cpu().tolist()
 
-
-def train(args, train_dataset, model, tokenizer):
+def train(args, train_dataset, eval_dataset, model, tokenizer):
     base_output_dir = args.model_arch + '-result'
     output_dir_pattern = re.compile(base_output_dir + r'.*')
     count = 0
@@ -250,7 +255,7 @@ def train(args, train_dataset, model, tokenizer):
                 if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     # Only evaluate when single GPU otherwise metrics may not average well
                     if args.local_rank == -1 and args.evaluate_during_training:
-                        results = evaluate(args, model, tokenizer, do_test=args.do_test)
+                        results = evaluate(args, model, eval_dataset)
                         for key, value in results.items():
                             tb_writer.add_scalar("eval_{}".format(key), value, global_step)
                     tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
@@ -265,8 +270,9 @@ def train(args, train_dataset, model, tokenizer):
                     model_to_save = model.module if hasattr(model, "module") else model
                     if not os.path.exists(output_dir): os.mkdir(output_dir)
                     model_to_save.save_pretrained(output_dir)
-                    tokenizer_file = os.path.join(output_dir, 'tokenizer.json')
-                    tokenizer.save(tokenizer_file)
+                    if args.model_type != 'albert':
+                        tokenizer_file = os.path.join(output_dir, 'tokenizer.json')
+                        tokenizer.save(tokenizer_file)
 
                     torch.save(args, os.path.join(output_dir, "training_args.bin"))
                     logger.info("Saving model checkpoint to %s", output_dir)
@@ -288,21 +294,12 @@ def train(args, train_dataset, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, do_test=False, prefix=""):
-    dataset = load_examples(args, tokenizer, evaluate=True)
-
-    if do_test:
-        if args.kaggle_output_dir is None:
-            num_runs = len(os.listdir(args.output_dir))
-            args.output_dir = os.path.join(args.output_dir, 'result-' + str(num_runs - 1))
-        else:
-            args.output_dir = args.kaggle_output_dir
-
+def evaluate(args, model, eval_dataset, prefix=""):
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
 
     # Note that DistributedSampler samples randomly
-    eval_sampler = SequentialSampler(dataset)
-    eval_dataloader = DataLoader(dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
+    eval_sampler = SequentialSampler(eval_dataset)
+    eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
     # multi-gpu evaluate
     if args.n_gpu > 1 and not isinstance(model, torch.nn.DataParallel):
@@ -310,7 +307,7 @@ def evaluate(args, model, tokenizer, do_test=False, prefix=""):
 
     # Eval!
     logger.info("***** Running evaluation {} *****".format(prefix))
-    logger.info("  Num examples = %d", len(dataset))
+    logger.info("  Num examples = %d", len(eval_dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
 
     all_results = {}
@@ -377,7 +374,7 @@ def evaluate(args, model, tokenizer, do_test=False, prefix=""):
         json.dump(topk_bad_cases, f, indent=4)
 
     evalTime = timeit.default_timer() - start_time
-    logger.info("  Evaluation done in total %f secs (%f sec per example)", evalTime, evalTime / len(dataset))
+    logger.info("  Evaluation done in total %f secs (%f sec per example)", evalTime, evalTime / len(eval_dataset))
 
     return {f'jaccard': avg_jaccard_score}
 
@@ -417,17 +414,10 @@ def main():
         help="The output directory where the model checkpoints and predictions will be written.",
     )
     parser.add_argument(
-        "--submission_models",
+        "--eval_model_dir",
         default=None,
         type=str,
-        help="model have been finetuned, used for predicting test file ",
-    )
-    # Other parameters
-    parser.add_argument(
-        "--kaggle_output_dir",
-        default=None,
-        type=str,
-        help="kaggle kernel output directory",
+        help="The output directory where the model checkpoints and predictions will be written.",
     )
     parser.add_argument(
         "--data_dir",
@@ -460,13 +450,6 @@ def main():
         help="Pretrained tokenizer name or path if not the same as model_name",
     )
     parser.add_argument(
-        "--cache_dir",
-        default="",
-        type=str,
-        help="Where do you want to store the pre-trained models downloaded from s3",
-    )
-
-    parser.add_argument(
         "--version_2_with_negative",
         action="store_true",
         help="If true, the SQuAD examples contain some that do not have an answer.",
@@ -486,7 +469,6 @@ def main():
     )
     parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
     parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the dev set.")
-    parser.add_argument("--do_test", action="store_true", help="Whether to run test on the test set.")
     parser.add_argument(
         "--evaluate_during_training", action="store_true", help="Run evaluation during training at each logging step."
     )
@@ -619,7 +601,6 @@ def main():
     args.model_type = args.model_type.lower()
     config = AutoConfig.from_pretrained(
         args.config_name if args.config_name else args.model_name_or_path,
-        cache_dir=args.cache_dir if args.cache_dir else None,
         output_hidden_states=True,
     )
     if args.model_type == 'roberta':
@@ -629,17 +610,17 @@ def main():
             add_prefix_space=True,
             lowercase=args.do_lower_case
         )
-    elif args.model_type == 'bert':
+    elif args.model_type in ['bert', 'distilbert']:
         tokenizer = BertWordPieceTokenizer(
             vocab_file=os.path.join(args.model_name_or_path, 'vocab.txt'),
             lowercase=args.do_lower_case
-
         )
+    elif 'spiece.model' in os.listdir(args.model_name_or_path):
+        tokenizer = SentencePieceTokenizer(args.model_name_or_path)
     model = QuestionAnswering()(args.model_type).from_pretrained(
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
         config=config,
-        cache_dir=args.cache_dir if args.cache_dir else None,
     )
 
     if args.local_rank == 0:
@@ -664,7 +645,8 @@ def main():
     # Training
     if args.do_train:
         train_dataset = load_examples(args, tokenizer, evaluate=False)
-        global_step, tr_loss = train(args, train_dataset, model, tokenizer)
+        eval_dataset = load_examples(args, tokenizer, evaluate=True)
+        global_step, tr_loss = train(args, train_dataset, eval_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
     output_dir = ''
@@ -679,32 +661,33 @@ def main():
         model_to_save = model.module if hasattr(model, "module") else model
         if not os.path.exists(output_dir): os.mkdir(output_dir)
         model_to_save.save_pretrained(output_dir)
-        tokenizer_file = os.path.join(output_dir, 'tokenizer.json')
-        tokenizer.save(tokenizer_file)
+        if args.model_type != 'albert':
+            tokenizer_file = os.path.join(output_dir, 'tokenizer.json')
+            tokenizer.save(tokenizer_file)
 
         # Good practice: save your training arguments together with the trained model
         torch.save(args, os.path.join(output_dir, "training_args.bin"))
 
         # Load a trained model and vocabulary that you have fine-tuned
         model = QuestionAnswering()(args.model_type).from_pretrained(output_dir)
-        tokenizer = Tokenizer.from_file(tokenizer_file)
         model.to(args.device)
 
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
     if args.do_eval and args.local_rank in [-1, 0]:
+        if not args.do_train:
+            args.output_dir = args.eval_model_dir
+            eval_dataset = load_examples(args, tokenizer, evaluate=True)
         results = {}
         if args.do_train:
             logger.info("Loading checkpoints saved during training for evaluation")
             checkpoints = [output_dir]
-            if args.eval_all_checkpoints:
-                checkpoints = list(
-                    os.path.dirname(c)
-                    for c in sorted(glob.glob(args.output_dir + "/**/" + WEIGHTS_NAME, recursive=True))
-                )
-                logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
-        else:
-            logger.info("Loading checkpoint %s for evaluation", args.model_name_or_path)
-            checkpoints = [args.model_name_or_path]
+        if args.eval_all_checkpoints:
+            checkpoints = list(
+                os.path.dirname(c)
+                for c in sorted(glob.glob(args.output_dir + "/**/" + WEIGHTS_NAME, recursive=True))
+            )
+            logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce model loading logs
+
 
         logger.info("Evaluate the following checkpoints: %s", checkpoints)
 
@@ -717,9 +700,14 @@ def main():
 
             # Evaluate
             args.output_dir = checkpoint
-            result = evaluate(args, model, tokenizer, do_test=args.do_test, prefix=global_step)
+            result = evaluate(args, model, eval_dataset, prefix=global_step)
             result = dict((k + ("_{}".format(global_step) if global_step else ""), v) for k, v in result.items())
             results.update(result)
+
+            del model
+            torch.cuda.empty_cache()
+            gc.collect()
+
 
         eval_result = "Results: {}".format(results)
         args.output_dir = output_dir
@@ -728,21 +716,6 @@ def main():
             f.write(eval_result)
 
         return results
-
-    # generate submission file
-    if args.do_test:
-        logger.info("Loading checkpoints saved during training for testing")
-        if args.submission_models is None:
-            if args.do_train:
-                args.submission_models = args.output_dir
-            else:
-                num_runs = len(os.listdir(args.output_dir))
-                args.submission_models = os.path.join(args.output_dir, 'result-' + str(num_runs - 1))
-        model = QuestionAnswering()(args.model_type).from_pretrained(args.submission_models)
-        tokenizer = Tokenizer.from_file(tokenizer_file)
-        model.to(args.device)
-        evaluate(args, model, tokenizer, do_test=args.do_test)
-
 
 if __name__ == "__main__":
     main()

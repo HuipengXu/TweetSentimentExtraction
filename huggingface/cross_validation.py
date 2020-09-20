@@ -4,9 +4,11 @@ import os
 import pickle
 import random
 import timeit
+import json
 import gc
+import re
 
-from utils import load_examples, get_jaccard_and_pred_ans
+from utils import load_examples, get_jaccard_and_pred_ans, SentencePieceTokenizer
 
 import numpy as np
 import pandas as pd
@@ -28,7 +30,6 @@ from model import QuestionAnswering
 
 from sklearn.model_selection import StratifiedKFold
 
-
 # from transformers.data.metrics.squad_metrics import (
 #     compute_predictions_log_probs,
 #     compute_predictions_logits,
@@ -40,7 +41,6 @@ try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:
     from tensorboardX import SummaryWriter
-
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +62,8 @@ def to_list(tensor):
 
 def train(args, train_dataset, eval_dataset, model, tokenizer, n_fold):
     fold_best_model_dir = os.path.join(args.best_model_dir, f"fold-{n_fold}")
-    if not os.path.exists(fold_best_model_dir): os.makedirs(fold_best_model_dir)
-
+    if not os.path.exists(fold_best_model_dir):
+        os.makedirs(fold_best_model_dir)
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
@@ -83,7 +83,6 @@ def train(args, train_dataset, eval_dataset, model, tokenizer, n_fold):
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
     )
-
 
     if args.fp16:
         try:
@@ -106,7 +105,7 @@ def train(args, train_dataset, eval_dataset, model, tokenizer, n_fold):
         "  Total train batch size (w. parallel & accumulation) = %d",
         args.train_batch_size
         * args.gradient_accumulation_steps
-        )
+    )
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
 
@@ -121,7 +120,6 @@ def train(args, train_dataset, eval_dataset, model, tokenizer, n_fold):
 
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
-        args.use_jaccard_soft = True
         for step, batch in enumerate(epoch_iterator):
 
             model.train()
@@ -171,10 +169,9 @@ def train(args, train_dataset, eval_dataset, model, tokenizer, n_fold):
                 model.zero_grad()
                 global_step += 1
 
-
         jaccard_score = evaluate(args, model, eval_dataset)
         logger.info(f'fold-{n_fold}, global step {global_step} jaccard score: {jaccard_score:.4f},'
-              f' current best jaccard score {best_jac:.4f}')
+                    f' current best jaccard score {best_jac:.4f}')
         if jaccard_score > best_jac:
             # Take care of distributed/parallel training
             model_to_save = model.module if hasattr(model, "module") else model
@@ -233,7 +230,6 @@ def train(args, train_dataset, eval_dataset, model, tokenizer, n_fold):
 
 
 def evaluate(args, model, dataset):
-
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
 
     # Note that DistributedSampler samples randomly
@@ -252,8 +248,8 @@ def evaluate(args, model, dataset):
     all_jaccards = []
     start_time = timeit.default_timer()
 
+    model.eval()
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
-        model.eval()
         batch_for_forward = tuple(t.to(args.device) for _, t in list(batch.items())[:3])
 
         with torch.no_grad():
@@ -285,10 +281,10 @@ def evaluate(args, model, dataset):
                 orig_selected_text = batch['orig_selected_text'][i]
                 sentiment = batch['sentiment'][i]
                 _, jaccard_score = get_jaccard_and_pred_ans(start_idxs[i], end_idxs[i],
-                                                                             batch['offsets'][i],
-                                                                             orig_text,
-                                                                             orig_selected_text,
-                                                                             sentiment)
+                                                            batch['offsets'][i],
+                                                            orig_text,
+                                                            orig_selected_text,
+                                                            sentiment)
                 all_jaccards.append(jaccard_score)
 
     avg_jaccard_score = sum(all_jaccards) / len(all_jaccards) * 100
@@ -412,6 +408,13 @@ def main():
     args.n_gpu = torch.cuda.device_count()
     args.device = device
     args.best_model_dir = os.path.join(args.first_level_models, args.model_arch)
+    best_model_dir_pat = re.compile(args.model_arch + r'.*')
+    count = 0
+    for d in os.listdir(args.first_level_models):
+        if best_model_dir_pat.match(d):
+            count += 1
+    args.best_model_dir += '-' + str(count)
+    os.makedirs(args.best_model_dir)
 
     # Setup logging
     logging.basicConfig(
@@ -432,12 +435,13 @@ def main():
             add_prefix_space=True,
             lowercase=args.do_lower_case
         )
-    elif args.model_type == 'bert':
+    elif args.model_type in ['bert', 'distilbert']:
         tokenizer = BertWordPieceTokenizer(
             vocab_file=os.path.join(args.model_name_or_path, 'vocab.txt'),
             lowercase=args.do_lower_case
-
         )
+    elif 'spiece.model' in os.listdir(args.model_name_or_path):
+        tokenizer = SentencePieceTokenizer(args.model_name_or_path)
 
     logger.info("Training/evaluation parameters %s", args)
 
@@ -448,10 +452,10 @@ def main():
     score = 0
     oof_pred_probs = {}
     oof_offsets = {}
-    splits = StratifiedKFold(n_splits=args.splits, random_state=args.seed).split(total_df, total_df.sentiment)
+    splits = StratifiedKFold(n_splits=args.splits, random_state=args.seed,
+                             shuffle=True).split(total_df, total_df.sentiment)
     for f, (train_idx, valid_idx) in enumerate(splits, start=1):
         logger.info(f' -> fold {f} starting ...')
-        args.use_jaccard_soft = True
         args.seed += f
         set_seed(args)
         train_df = total_df.iloc[train_idx]
@@ -466,8 +470,7 @@ def main():
         eval_dataset = load_examples(args, tokenizer, evaluate=True)
         model = QuestionAnswering()(args.model_type).from_pretrained(
             args.model_name_or_path,
-            from_tf=bool(".ckpt" in args.model_name_or_path),
-            config=config,
+            config=config
         )
         model.to(args.device)
         fold_jaccard, fold_pred_probs, offsets = train(args, train_dataset, eval_dataset, model, tokenizer, f)
@@ -479,10 +482,9 @@ def main():
         })
         score += fold_jaccard / args.splits
 
-        del model, train_dataset, eval_dataset, train_df, valid_df
-        torch.cuda.empty_cache()
-        gc.collect()
-
+        # del model, train_dataset, eval_dataset, train_df, valid_df
+        # torch.cuda.empty_cache()
+        # gc.collect()
 
     logger.info(' -> saving first level predict probability')
 
@@ -493,10 +495,9 @@ def main():
         pickle.dump(oof_offsets, f)
 
     logger.info(f' -> cv jaccard score : {score:.3f}')
-
-
-
-
+    eval_result = {'jaccard_score': score}
+    with open(os.path.join(args.best_model_dir, 'eval_result.json'), 'w', encoding='utf8') as f:
+        json.dump(eval_result, f)
 
 
 if __name__ == "__main__":

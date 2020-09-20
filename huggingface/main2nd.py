@@ -8,7 +8,7 @@ import json
 import random
 import timeit
 
-from model import CharRNN, TweetCharModel, CharCNN
+from model import CharRNN, TweetCharModel, CharCNN, CharCNNCross
 from utils import (
     load_char_level_examples,
     get_jaccard_and_pred_ans,
@@ -18,8 +18,8 @@ from utils import (
 import numpy as np
 import pandas as pd
 import torch
-from torchcontrib.optim import SWA
-from torch.optim import Adam
+from torch.optim.swa_utils import AveragedModel, SWALR
+from swa_utils import update_bn
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tqdm import tqdm, trange
@@ -74,7 +74,6 @@ def train(args, train_dataset, model, tokenizer):
     args.logging_steps = int(args.logging_step_ratio * t_total)
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate, eps=args.adam_epsilon)
-    # optimizer = SWA(optimizer)
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=t_total
     )
@@ -82,6 +81,10 @@ def train(args, train_dataset, model, tokenizer):
     # multi-gpu training (should be after apex fp16 initialization)
     if args.n_gpu > 1:
         model = torch.nn.DataParallel(model)
+
+    if args.use_swa:
+        swa_model = AveragedModel(model)
+        swa_scheduler = SWALR(optimizer, swa_lr=8e-4)
 
     # Train!
     logger.info("***** Running training *****")
@@ -147,10 +150,15 @@ def train(args, train_dataset, model, tokenizer):
                 logging_loss = tr_loss
 
             # Save model checkpoint
-            if global_step / t_total > 0.85 and global_step % args.save_steps == 0:
+            if global_step / t_total > 0.85 and global_step % args.save_steps == 0 \
+                    and epoch >= args.swa_first_epoch:
                 output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
                 # Take care of distributed/parallel training
-                model_to_save = model.module if hasattr(model, "module") else model
+                if args.use_swa:
+                    update_bn(train_dataloader, swa_model, args.device)
+                    model_to_save = swa_model.module if hasattr(swa_model, "module") else swa_model
+                else:
+                    model_to_save = model.module if hasattr(model, "module") else model
                 if not os.path.exists(output_dir): os.mkdir(output_dir)
                 torch.save(model_to_save.state_dict(),
                            os.path.join(output_dir, 'weight.pt'))
@@ -166,12 +174,9 @@ def train(args, train_dataset, model, tokenizer):
                 epoch_iterator.close()
                 break
 
-        # if epoch + 1 >= args.swa_first_epoch:
-        #     optimizer.update_swa()
-        #     optimizer.swap_swa_sgd()
-        #
-        # if epoch + 1 >= args.swa_first_epoch:
-        #     optimizer.swap_swa_sgd()
+        if args.use_swa and epoch + 1 >= args.swa_first_epoch:
+            swa_model.update_parameters(model)
+            swa_scheduler.step()
 
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
@@ -217,11 +222,15 @@ def evaluate(args, model, tokenizer, prefix=""):
                 "sentiment_ids": batch_for_forward[3]
             }
 
-            start_logits, end_logits = model(**inputs)
-            # 这里只是分别根据最大的 logit 取出对应的索引，还存在一种可能这些索引超出了 context 所在的长度范围，直接使用它们
-            # 可能拿到的不是最可能的答案范围
-            start_idxs = start_logits.argmax(dim=-1)
-            end_idxs = end_logits.argmax(dim=-1)
+            if args.use_beam_search:
+                start_idxs, end_idxs = model(**inputs, beam_size=args.beam_size)
+            else:
+                # 这里只是分别根据最大的 logit 取出对应的索引，还存在一种可能这些索引超出了 context 所在的长度范围，直接使用它们
+                # 可能拿到的不是最可能的答案范围
+                start_logits, end_logits = model(**inputs)
+                start_idxs = start_logits.argmax(dim=-1)
+                end_idxs = end_logits.argmax(dim=-1)
+
             for i in range(len(batch['orig_text'])):
                 orig_text = batch['orig_text'][i]
                 orig_selected_text = batch['orig_selected_text'][i]
@@ -361,6 +370,7 @@ def main():
     parser.add_argument(
         "--swa_first_epoch", default=5.0, type=float, help="Total number of training epochs to perform."
     )
+    parser.add_argument("--use_swa", action="store_true", help="whether to use swa")
     parser.add_argument(
         "--alpha",
         default=0.3,
@@ -368,6 +378,8 @@ def main():
         help="used in jaccard-based soft labels"
     )
     parser.add_argument("--use_jaccard_soft", action="store_true", help="whether to use jaccard-based soft labels.")
+    parser.add_argument("--use_beam_search", action="store_true", help="whether to use beam search")
+    parser.add_argument("--beam_size", type=int, default=3, help="whether to use beam search")
     parser.add_argument(
         "--max_steps",
         default=-1,
@@ -457,7 +469,6 @@ def main():
         logger.info("Saving model checkpoint to %s", output_dir)
         # Save a trained model, configuration and tokenizer using `save_pretrained()`.
         # They can then be reloaded using `from_pretrained()`
-        # Take care of distributed/parallel training
         # Take care of distributed/parallel training
         model_to_save = model.module if hasattr(model, "module") else model
         if not os.path.exists(output_dir): os.mkdir(output_dir)

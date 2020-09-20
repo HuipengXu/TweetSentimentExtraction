@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import json
 from tqdm import tqdm
+from sklearn.model_selection import StratifiedKFold
 
 
 def extend(row):
@@ -145,14 +146,17 @@ if __name__ == '__main__':
     train_df = train_df.sample(frac=1).reset_index(drop=True).dropna()
 
     train_df = train_df.apply(extend, axis=1)
+    splits = StratifiedKFold(n_splits=5, random_state=42, shuffle=True).split(train_df, train_df.sentiment)
+    train_idx, valid_idx = next(splits)
 
-    train_df.iloc[:5000].to_csv('./data/clean_valid.csv', index=False, encoding='utf8')
-    train_df.iloc[5000:].to_csv('./data/clean_train.csv', index=False, encoding='utf8')
+    train_df.iloc[valid_idx].to_csv('./data/clean_valid.csv', index=False, encoding='utf8')
+    train_df.iloc[train_idx].to_csv('./data/clean_train.csv', index=False, encoding='utf8')
 
     train_df = pd.read_csv(data_dir + 'clean_train.csv')
     valid_df = pd.read_csv(data_dir + 'clean_valid.csv')
 
     generate_debug_data(train_df, valid_df)
+    print('finished data preprocessing')
 
 """
 96ff964db0,"4 hours of sleep, a migraine, again? What is wrong with me?    hate my life",hat,hate,negative

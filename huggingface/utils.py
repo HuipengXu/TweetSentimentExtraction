@@ -12,6 +12,12 @@ import pickle
 import numpy as np
 import pandas as pd
 
+import sys
+
+sys.path.insert(0, './sentencepiece_pb2/')
+import sentencepiece as spm
+import sentencepiece_pb2
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 
@@ -824,7 +830,7 @@ def jaccard_based_soft_labels(alpha, tok_text_length, orig_start, orig_end, tok_
 
 # TODO 用自己的方法试试，对 text 和 selected_text 同时 tokenize，然后在 text 中 find
 def process_data(tokenizer, text, selected_text, extended_selected_text, sentiment, example_id,
-                 model_type, max_length, alpha=1., use_jaccard_soft=False):
+                 model_type, model_name_or_path, max_length, alpha=1., use_jaccard_soft=False):
     text = ' '.join(str(text).split())
     selected_text = ' '.join(str(selected_text).split())
     if model_type == 'roberta':
@@ -839,7 +845,7 @@ def process_data(tokenizer, text, selected_text, extended_selected_text, sentime
             start_idx = i
             end_idx = i + selected_text_length - 2
             break
-        elif model_type == 'bert' and c == selected_text[0] and \
+        elif model_type in ['bert', 'distilbert', 'albert'] and c == selected_text[0] and \
                 text[i: i + selected_text_length] == selected_text:
             start_idx = i
             end_idx = i + selected_text_length - 1
@@ -850,10 +856,10 @@ def process_data(tokenizer, text, selected_text, extended_selected_text, sentime
         char_targets[start_idx: end_idx + 1] = 1
 
     tok_text = tokenizer.encode(text)
-    if model_type == 'roberta':
+    if model_type in ['roberta', 'albert']:
         input_ids_orig = tok_text.ids
         text_offsets = tok_text.offsets
-    elif model_type == 'bert':
+    elif model_type in ['bert', 'distilbert']:
         input_ids_orig = tok_text.ids[1:-1]
         text_offsets = tok_text.offsets[1:-1]
 
@@ -865,16 +871,26 @@ def process_data(tokenizer, text, selected_text, extended_selected_text, sentime
     tok_start_idx = target_idxs[0]
     tok_end_idx = target_idxs[-1]
 
-    if model_type == 'roberta':
+    if model_type == 'roberta':  # roberta 和 distilroberta 特殊符号以及情感 id 一致
+        # positive: 1313 是加了空格的结果，即 ' positive'，另外两个同理
         sentiment_id = {'positive': 1313, 'negative': 2430, 'neutral': 7974}
         input_ids = [0] + [sentiment_id[sentiment]] + [2] + [2] + input_ids_orig + [2]
         text_offsets = [(0, 0)] * 4 + text_offsets + [(0, 0)]  # 0 用来表示特殊符号的范围，比如 <s></s>，(0, 0) 表示不可用
         token_type_ids = [0] * len(input_ids)
         tok_start_idx += 4
         tok_end_idx += 4
-    elif model_type == 'bert':
-        sentiment_id = {'positive': 3112, 'negative': 4366, 'neutral': 8795}
-        input_ids = [101] + [sentiment_id[sentiment]] + [102] + input_ids_orig + [102]
+    elif model_type in ['bert', 'distilbert', 'albert']:
+        if model_type == 'bert':
+            sentiment_id = {'positive': 3112, 'negative': 4366, 'neutral': 8795}
+            if 'wwm' in model_name_or_path:
+                sentiment_id = {'positive': 3893, 'negative': 4997, 'neutral': 8699}
+            input_ids = [101] + [sentiment_id[sentiment]] + [102] + input_ids_orig + [102]
+        elif model_type == 'distilbert':  # bert-wwm 和 distilbert 的情感 id 一致
+            sentiment_id = {'positive': 3893, 'negative': 4997, 'neutral': 8699}
+            input_ids = [101] + [sentiment_id[sentiment]] + [102] + input_ids_orig + [102]
+        elif model_type == 'albert':
+            sentiment_id = {'positive': 2221, 'negative': 3682, 'neutral': 8387}
+            input_ids = [2] + [sentiment_id[sentiment]] + [3] + input_ids_orig + [3]
         token_type_ids = [0] * 3 + [1] * (len(input_ids_orig) + 1)
         text_offsets = [(0, 0)] * 3 + text_offsets + [(0, 0)]
         tok_start_idx += 3
@@ -886,7 +902,7 @@ def process_data(tokenizer, text, selected_text, extended_selected_text, sentime
     if padding_length > 0:
         if model_type == 'roberta':
             pad_id = 1
-        elif model_type == 'bert':
+        elif model_type in ['bert', 'distilbert', 'albert']:
             pad_id = 0
         input_ids += [pad_id] * padding_length
         attention_mask += [0] * padding_length
@@ -929,7 +945,7 @@ def process_data(tokenizer, text, selected_text, extended_selected_text, sentime
 class TweetData(Dataset):
 
     def __init__(self, tokenizer, example_ids, texts, sentiments, selected_texts, extended_selected_texts,
-                 model_type, max_length=128, evaluate=False, alpha=1., use_jaccard_soft=False):
+                 model_type, model_name_or_path, max_length=128, evaluate=False, alpha=1., use_jaccard_soft=False):
         super(TweetData, self).__init__()
         self.tokenizer = tokenizer
         self.example_ids = example_ids
@@ -938,6 +954,7 @@ class TweetData(Dataset):
         self.selected_texts = selected_texts
         self.extended_selected_texts = extended_selected_texts
         self.model_type = model_type
+        self.model_name_or_path = model_name_or_path
         self.max_length = max_length
         self.evaluate = evaluate
         self.use_jaccard_soft = use_jaccard_soft
@@ -951,6 +968,7 @@ class TweetData(Dataset):
                             self.sentiments[item],
                             self.example_ids[item],
                             self.model_type,
+                            self.model_name_or_path,
                             self.max_length,
                             self.alpha,
                             self.use_jaccard_soft)
@@ -981,7 +999,8 @@ class TweetData(Dataset):
 
 def load_examples(args, tokenizer, evaluate):
     filename = args.predict_file if evaluate else args.train_file
-    if evaluate: args.use_jaccard_soft = False
+    use_jaccard_soft = args.use_jaccard_soft
+    if evaluate: use_jaccard_soft = False
     df = pd.read_csv(os.path.join(args.data_dir, filename))
     texts = df.text.tolist()
     selected_texts = df.selected_text.tolist()
@@ -989,7 +1008,8 @@ def load_examples(args, tokenizer, evaluate):
     sentiments = df.sentiment.tolist()
     ids = df.textID.tolist()
     dataset = TweetData(tokenizer, ids, texts, sentiments, selected_texts, extended_selected_texts,
-                        args.model_type, args.max_seq_length, evaluate, args.alpha, args.use_jaccard_soft)
+                        args.model_type, args.model_name_or_path, args.max_seq_length, evaluate,
+                        args.alpha, use_jaccard_soft)
     return dataset
 
 
@@ -1008,6 +1028,8 @@ def get_jaccard_and_pred_ans(start_idx, end_idx, offsets, orig_text, orig_select
     else:
         pred_selected_text = orig_text[start_idx: end_idx + 1]
 
+    # magic，居然有害
+    # pred_selected_text = pp(pred_selected_text, orig_text)
     jaccard_score = compute_jaccard(orig_selected_text, pred_selected_text)
 
     return pred_selected_text, jaccard_score
@@ -1174,22 +1196,107 @@ def load_char_level_examples(args, tokenizer, evaluate):
     return dataset
 
 
+class SentencePieceTokenizer:
+    def __init__(self, model_path):
+        self.sp = spm.SentencePieceProcessor()
+        self.sp.load(os.path.join(model_path, "spiece.model"))
+
+    def encode(self, sentence):
+        spt = sentencepiece_pb2.SentencePieceText()
+        spt.ParseFromString(self.sp.encode_as_serialized_proto(sentence))
+        tokens = collections.namedtuple('SentencePiecedToken', ['ids', 'offsets'])
+        ids = []
+        offsets = []
+        for piece in spt.pieces:
+            ids.append(piece.id)
+            offsets.append((piece.begin, piece.end))
+        tokens.ids = ids
+        tokens.offsets = offsets
+        return tokens
+
+
+def pp(filtered_output, real_tweet):
+    filtered_output = ' '.join(filtered_output.split())
+    if len(real_tweet.split()) < 2:
+        filtered_output = real_tweet
+    else:
+        if len(filtered_output.split()) == 1:
+            if filtered_output.endswith(".."):
+                if real_tweet.startswith(" "):
+                    st = real_tweet.find(filtered_output)
+                    fl = real_tweet.find("  ")
+                    if fl != -1 and fl < st:
+                        filtered_output = re.sub(r'(\.)\1{2,}', '', filtered_output)
+                    else:
+                        filtered_output = re.sub(r'(\.)\1{2,}', '.', filtered_output)
+                else:
+                    st = real_tweet.find(filtered_output)
+                    fl = real_tweet.find("  ")
+                    if fl != -1 and fl < st:
+                        filtered_output = re.sub(r'(\.)\1{2,}', '.', filtered_output)
+                    else:
+                        filtered_output = re.sub(r'(\.)\1{2,}', '..', filtered_output)
+                return filtered_output
+            if filtered_output.endswith('!!'):
+                if real_tweet.startswith(" "):
+                    st = real_tweet.find(filtered_output)
+                    fl = real_tweet.find("  ")
+                    if fl != -1 and fl < st:
+                        filtered_output = re.sub(r'(\!)\1{2,}', '', filtered_output)
+                    else:
+                        filtered_output = re.sub(r'(\!)\1{2,}', '!', filtered_output)
+                else:
+                    st = real_tweet.find(filtered_output)
+                    fl = real_tweet.find("  ")
+                    if fl != -1 and fl < st:
+                        filtered_output = re.sub(r'(\!)\1{2,}', '!', filtered_output)
+                    else:
+                        filtered_output = re.sub(r'(\!)\1{2,}', '!!', filtered_output)
+                return filtered_output
+
+        if real_tweet.startswith(" "):
+            filtered_output = filtered_output.strip()
+            text_annotetor = ' '.join(real_tweet.split())
+            start = text_annotetor.find(filtered_output)
+            end = start + len(filtered_output)
+            start -= 0
+            end += 2
+            flag = real_tweet.find("  ")
+            if flag < start:
+                filtered_output = real_tweet[start:end]
+
+        if "  " in real_tweet and not real_tweet.startswith(" "):
+            filtered_output = filtered_output.strip()
+            text_annotetor = re.sub(" {2,}", " ", real_tweet)
+            start = text_annotetor.find(filtered_output)
+            end = start + len(filtered_output)
+            start -= 0
+            end += 2
+            flag = real_tweet.find("  ")
+            if flag < start:
+                filtered_output = real_tweet[start:end]
+    return filtered_output
+
+
 if __name__ == '__main__':
-    from tokenizers import ByteLevelBPETokenizer, BertWordPieceTokenizer
+    from tokenizers import ByteLevelBPETokenizer, BertWordPieceTokenizer, SentencePieceBPETokenizer
     import pandas as pd
     import argparse
 
-    tokenizer = ByteLevelBPETokenizer(vocab_file='../models/roberta-base/vocab.json',
-                                      merges_file='../models/roberta-base/merges.txt',
-                                      add_prefix_space=True,
-                                      lowercase=True)
+    # tokenizer = ByteLevelBPETokenizer(vocab_file='../models/roberta-base/vocab.json',
+    #                                   merges_file='../models/roberta-base/merges.txt',
+    #                                   add_prefix_space=True,
+    #                                   lowercase=True)
     # tokenizer = BertWordPieceTokenizer(
-    #     vocab_file=os.path.join('../models/bert-base-cased', 'vocab.txt'),
+    #     vocab_file=os.path.join('../models/distilbert-base-uncased-squad2', 'vocab.txt'),
     #     lowercase=False
     # )
+    # tokenizer = SentencePieceTokenizer('../models/albert-large-v2/')
+    # print(tokenizer.encode('positive negative neutral').ids)
+    # print(tokenizer.decode([0]))
     parser = argparse.ArgumentParser()
     parser.add_argument('--train_file', default='debug_train.csv', type=str)
-    parser.add_argument('--model_type', default='roberta', type=str)
+    parser.add_argument('--model_type', default='albert', type=str)
     parser.add_argument('--predict_file', default='debug_valid.csv', type=str)
     parser.add_argument('--data_dir', default='../data/', type=str)
     parser.add_argument('--max_seq_length', default=180, type=int)
@@ -1201,13 +1308,13 @@ if __name__ == '__main__':
     )
     parser.add_argument("--use_jaccard_soft", action="store_false", help="whether to use jaccard-based soft labels.")
     args = parser.parse_args()
-    args.first_level_model = './first_level_models/roberta-base-last2h-conv/'
-    tokenizer = Tokenizer(num_words=None, char_level=True, oov_token='UNK', lower=True)
-    train_texts = pd.read_csv(os.path.join(args.data_dir, args.train_file)).text.tolist()
-    tokenizer.fit_on_texts(train_texts)
-    args.vocab_size = len(tokenizer.word_index) + 1
-
-    train_dataset = load_char_level_examples(args, tokenizer, False)
+    # args.first_level_model = './first_level_models/roberta-base-last2h-conv/'
+    # tokenizer = Tokenizer(num_words=None, char_level=True, oov_token='UNK', lower=True)
+    # train_texts = pd.read_csv(os.path.join(args.data_dir, args.train_file)).text.tolist()
+    # tokenizer.fit_on_texts(train_texts)
+    # args.vocab_size = len(tokenizer.word_index) + 1
+    #
+    # train_dataset = load_char_level_examples(args, tokenizer, False)
     #
     # dataset = load_examples(args, tokenizer)
     # print(dataset[4])
@@ -1218,11 +1325,11 @@ if __name__ == '__main__':
     # print(max_length + 5)
     # max length 105
     # train_dataset = load_examples(args, tokenizer, evaluate=False)
-    from torch.utils.data import DataLoader
-
-    dataloader = DataLoader(train_dataset, shuffle=True, batch_size=32)
-    for batch in dataloader:
-        print('hah')
+    # from torch.utils.data import DataLoader
+    #
+    # dataloader = DataLoader(train_dataset, shuffle=True, batch_size=32)
+    # for batch in dataloader:
+    #     print('hah')
     # train_df = pd.read_csv('../data/debug_train.csv')
     # text = train_df.text.tolist()
     # tokenizer = KTokenizer(num_words=None, char_level=True, oov_token='UNK', lower=True)
@@ -1231,7 +1338,12 @@ if __name__ == '__main__':
     # print(len(ids[0]))
     # print(len('you are so beautiful'))
     # print(ids)
-
-
-
-
+    # tokenizer = SentencePieceBPETokenizer(
+    #     vocab_file='../models/albert-large-v2/'
+    # )
+    # spt = SentencePieceTokenizer('../models/albert-large-v2/')
+    # tokens = spt.encode('negative neutral')
+    # print(tokens.ids, tokens.offsets)
+    tweet = " yea i just got outta one too....i want him back tho  but i feel the same way...i`m cool on dudes for a lil while"
+    predict = "cool"
+    pp(predict, tweet)
