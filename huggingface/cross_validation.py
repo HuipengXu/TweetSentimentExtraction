@@ -176,8 +176,9 @@ def train(args, train_dataset, eval_dataset, model, tokenizer, n_fold):
             # Take care of distributed/parallel training
             model_to_save = model.module if hasattr(model, "module") else model
             model_to_save.save_pretrained(fold_best_model_dir)
-            tokenizer_file = os.path.join(fold_best_model_dir, 'tokenizer.json')
-            tokenizer.save(tokenizer_file)
+            if args.model_type != 'albert':
+                tokenizer_file = os.path.join(fold_best_model_dir, 'tokenizer.json')
+                tokenizer.save(tokenizer_file)
 
             torch.save(args, os.path.join(fold_best_model_dir, "training_args.bin"))
             logger.info("Saving model checkpoint to %s", fold_best_model_dir)
@@ -262,15 +263,6 @@ def evaluate(args, model, dataset):
             if args.model_type in ["xlm", "roberta", "distilbert", "camembert", "bart"]:
                 del inputs["token_type_ids"]
 
-            # XLNet and XLM use more arguments for their predictions
-            # TODO 注意对 batch 的修改，batch 已经是 dict 了
-            if args.model_type in ["xlnet", "xlm"]:
-                inputs.update({"cls_index": batch[4], "p_mask": batch[5]})
-                # for lang_id-sensitive xlm models
-                if hasattr(model, "config") and hasattr(model.config, "lang2id"):
-                    inputs.update(
-                        {"langs": (torch.ones(batch[0].shape, dtype=torch.int64) * args.lang_id).to(args.device)}
-                    )
             start_logits, end_logits = model(**inputs)
             # 这里只是分别根据最大的 logit 取出对应的索引，还存在一种可能这些索引超出了 context 所在的长度范围，直接使用它们
             # 可能拿到的不是最可能的答案范围
@@ -383,13 +375,7 @@ def main():
     )
     parser.add_argument("--use_jaccard_soft", action="store_true", help="whether to use jaccard-based soft labels.")
     parser.add_argument("--warmup_steps", default=0, type=int, help="Linear warmup over warmup_steps.")
-    parser.add_argument(
-        "--verbose_logging",
-        action="store_true",
-        help="If true, all of the warnings related to data processing will be printed. "
-             "A number of warnings are expected for a normal SQuAD evaluation.",
-    )
-    parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
+    parser.add_argument("--seed", type=int, default=2222, help="random seed for initialization")
     parser.add_argument(
         "--fp16",
         action="store_true",

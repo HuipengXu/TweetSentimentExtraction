@@ -472,7 +472,7 @@ class CharCNN(nn.Module):
     def forward(self, start_probs=None, end_probs=None, char_ids=None,
                 sentiment_ids=None, start_positions=None, end_positions=None):
         seq_len = char_ids.size(1)
-        probs = torch.stack([start_probs, end_probs], dim=-1).permute(0, 2, 1)
+        probs = torch.cat([start_probs, end_probs], dim=1)
         probs_emb = self.probs_cnn(probs).permute(0, 2, 1)
         char_emb = self.char_embedding(char_ids)
         sentiment_emb = self.sentiment_embedding(sentiment_ids).unsqueeze(1).expand(-1, seq_len, -1)

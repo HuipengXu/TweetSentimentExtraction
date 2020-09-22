@@ -23,7 +23,7 @@ export CUDA_VISIBLE_DEVICES=7
 
 
 python main2nd.py \
-  --model_type roberta-base-squad2-last3h-conv-jaccard-soft-0 \
+  --model_type roberta-base-squad2-last3h-conv-jaccard-soft-1/ \
   --model_arch CNN \
   --train_file clean_train.csv \
   --predict_file clean_valid.csv \

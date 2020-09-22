@@ -6,6 +6,7 @@ import re
 import pickle
 import json
 import random
+from collections import defaultdict
 import timeit
 
 from model import CharRNN, TweetCharModel, CharCNN, CharCNNCross
@@ -140,11 +141,6 @@ def train(args, train_dataset, model, tokenizer):
 
             # Log metrics
             if args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                # Only evaluate when single GPU otherwise metrics may not average well
-                if args.evaluate_during_training:
-                    results = evaluate(args, model, tokenizer)
-                    for key, value in results.items():
-                        tb_writer.add_scalar("eval_{}".format(key), value, global_step)
                 tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
                 tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
                 logging_loss = tr_loss
@@ -266,21 +262,20 @@ def evaluate(args, model, tokenizer, prefix=""):
     return {f'jaccard': avg_jaccard_score}
 
 
-def get_1st_data(first_level_model_dir, filename, train_ids, valid_ids):
-    with open(os.path.join(first_level_model_dir, filename), 'rb') as f:
-        data = pickle.load(f)
-        train_data = {}
-        valid_data = {}
-        for id_ in train_ids:
-            train_data.update({id_: data[id_]})
-        for id_ in valid_ids:
-            valid_data.update({id_: data[id_]})
-        with open(os.path.join(first_level_model_dir,
-                               'train_' + filename), 'wb') as f1:
-            pickle.dump(train_data, f1)
-        with open(os.path.join(first_level_model_dir,
-                               'valid_' + filename), 'wb') as f2:
-            pickle.dump(valid_data, f2)
+def get_1st_data(first_level_dir, first_level_model_dirs, filename, train_ids, valid_ids):
+    train_data = defaultdict(list)
+    valid_data = defaultdict(list)
+    for first_level_model_dir in first_level_model_dirs:
+        with open(os.path.join(first_level_model_dir, filename), 'rb') as f:
+            data = pickle.load(f)
+            for id_ in tqdm(train_ids, desc='get 1st training data'):
+                train_data[id_].append(data[id_])
+            for id_ in tqdm(valid_ids, desc='get 1st valid data'):
+                valid_data[id_].append(data[id_])
+    with open(os.path.join(first_level_dir, 'train_' + filename), 'wb') as f1:
+        pickle.dump(train_data, f1)
+    with open(os.path.join(first_level_dir, 'valid_' + filename), 'wb') as f2:
+        pickle.dump(valid_data, f2)
 
 
 def main():
@@ -371,13 +366,6 @@ def main():
         "--swa_first_epoch", default=5.0, type=float, help="Total number of training epochs to perform."
     )
     parser.add_argument("--use_swa", action="store_true", help="whether to use swa")
-    parser.add_argument(
-        "--alpha",
-        default=0.3,
-        type=float,
-        help="used in jaccard-based soft labels"
-    )
-    parser.add_argument("--use_jaccard_soft", action="store_true", help="whether to use jaccard-based soft labels.")
     parser.add_argument("--use_beam_search", action="store_true", help="whether to use beam search")
     parser.add_argument("--beam_size", type=int, default=3, help="whether to use beam search")
     parser.add_argument(
@@ -419,7 +407,11 @@ def main():
     if not os.path.exists(args.data_dir): os.makedirs(args.data_dir)
 
     logger.info("starting use 1st level model to inference to get position probability")
-    first_level_model = os.path.join(args.first_level_models, args.model_type)
+    if len(args.model_type) == 0:
+        first_level_model = [os.path.join(args.first_level_models, model_name)
+                             for model_name in os.listdir(args.first_level_models)]
+    else:
+        first_level_model = [os.path.join(args.first_level_models, args.model_type)]
     args.first_level_model = first_level_model
     if not args.cv_probs:
         first_level_inference(first_level_model, data_type='train')
@@ -429,8 +421,8 @@ def main():
         valid_df = pd.read_csv(os.path.join(args.data_dir, args.predict_file))
         train_ids = train_df.textID.tolist()
         valid_ids = valid_df.textID.tolist()
-        get_1st_data(args.first_level_model, 'start_end_probs.pickle', train_ids, valid_ids)
-        get_1st_data(args.first_level_model, 'offsets.pickle', train_ids, valid_ids)
+        get_1st_data(args.first_level_models, args.first_level_model, 'start_end_probs.pickle', train_ids, valid_ids)
+        get_1st_data(args.first_level_models, args.first_level_model, 'offsets.pickle', train_ids, valid_ids)
 
     tokenizer = Tokenizer(num_words=None, char_level=True, oov_token='UNK', lower=True)
     train_texts = pd.read_csv(os.path.join(args.data_dir, args.train_file)).text.tolist()

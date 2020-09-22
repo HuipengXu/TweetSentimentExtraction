@@ -143,14 +143,17 @@ if __name__ == '__main__':
     # test_to_squad(test)
 
     train_df = pd.read_csv(data_dir + 'train.csv')
-    train_df = train_df.sample(frac=1).reset_index(drop=True).dropna()
+    train_df = train_df.sample(frac=1, random_state=4040).reset_index(drop=True).dropna()
 
     train_df = train_df.apply(extend, axis=1)
-    splits = StratifiedKFold(n_splits=5, random_state=42, shuffle=True).split(train_df, train_df.sentiment)
+    splits = StratifiedKFold(n_splits=5, random_state=2222, shuffle=True).split(train_df, train_df.sentiment)
     train_idx, valid_idx = next(splits)
 
     train_df.iloc[valid_idx].to_csv('./data/clean_valid.csv', index=False, encoding='utf8')
     train_df.iloc[train_idx].to_csv('./data/clean_train.csv', index=False, encoding='utf8')
+
+    # train_df.iloc[:5000].to_csv('./data/clean_valid.csv', index=False, encoding='utf8')
+    # train_df.iloc[5000:].to_csv('./data/clean_train.csv', index=False, encoding='utf8')
 
     train_df = pd.read_csv(data_dir + 'clean_train.csv')
     valid_df = pd.read_csv(data_dir + 'clean_valid.csv')

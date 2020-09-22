@@ -1039,7 +1039,7 @@ def get_jaccard_and_pred_ans(start_idx, end_idx, offsets, orig_text, orig_select
 class CharDataset(Dataset):
 
     def __init__(self, tokenizer, example_ids, texts, sentiments, selected_texts, extended_selected_texts,
-                 start_end_probs, offsets, max_length=128, evaluate=False, alpha=1., use_jaccard_soft=False):
+                 start_end_probs, offsets, num_models, max_length=128, evaluate=False):
         self.tokenizer = tokenizer
         self.example_ids = example_ids
         self.texts = texts
@@ -1051,9 +1051,8 @@ class CharDataset(Dataset):
         self.extended_selected_texts = extended_selected_texts
         self.start_end_probs = start_end_probs
         self.offsets = offsets
+        self.num_models = num_models
         self.evaluate = evaluate
-        self.use_jaccard_soft = use_jaccard_soft
-        self.alpha = alpha
 
     def __len__(self):
         return len(self.sentiments)
@@ -1065,12 +1064,14 @@ class CharDataset(Dataset):
         selected_text = self.selected_texts[item]
         start_end_probs = self.start_end_probs[example_id]
         char_ids = self.char_ids[item]
-        char_start_probs = np.zeros(len(char_ids))
-        char_end_probs = np.zeros(len(char_ids))
-        for i, (offset1, offset2) in enumerate(offsets):
-            if offset1 or offset2:  # 全零，不赋予概率
-                char_start_probs[offset1: offset2] = start_end_probs[i, 0]
-                char_end_probs[offset1: offset2] = start_end_probs[i, 1]
+        char_start_probs = np.zeros((self.num_models, len(char_ids)))
+        char_end_probs = np.zeros((self.num_models, len(char_ids)))
+
+        for i in range(self.num_models):
+            for j, (offset1, offset2) in enumerate(offsets[i]):
+                if offset1 or offset2:
+                    char_start_probs[i, offset1: offset2] = start_end_probs[i][j, 0]
+                    char_end_probs[i, offset1: offset2] = start_end_probs[i][j, 1]
 
         sentiment_id = self.sentiment2id[self.sentiments[item]]
 
@@ -1185,13 +1186,13 @@ def load_char_level_examples(args, tokenizer, evaluate):
     selected_texts = df.selected_text.tolist()
     extended_selected_texts = df.extended_selected_text.tolist()
     data_type = 'train' if not evaluate else 'valid'
-    with open(os.path.join(args.first_level_model, f'{data_type}_start_end_probs.pickle'), 'rb') as f:
+    with open(os.path.join(args.first_level_models, f'{data_type}_start_end_probs.pickle'), 'rb') as f:
         start_end_probs = pickle.load(f)
-    with open(os.path.join(args.first_level_model, f'{data_type}_offsets.pickle'), 'rb') as f:
+    with open(os.path.join(args.first_level_models, f'{data_type}_offsets.pickle'), 'rb') as f:
         offsets = pickle.load(f)
     dataset = CharDataset(
         tokenizer, example_ids, texts, sentiments, selected_texts, extended_selected_texts,
-        start_end_probs, offsets, args.max_seq_length, evaluate, args.alpha, args.use_jaccard_soft
+        start_end_probs, offsets, args.n_models, args.max_seq_length, evaluate
     )
     return dataset
 
