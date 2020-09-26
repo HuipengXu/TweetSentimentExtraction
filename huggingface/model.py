@@ -83,8 +83,8 @@ class RobertaForQuestionAnswering(BertPreTrainedModel):
         # self.conv = nn.Conv1d(config.hidden_size * 3, config.hidden_size, kernel_size=3, padding=(3 - 1) // 2)
         # self.fc = nn.Linear(config.hidden_size, 2)
         self.fc = nn.Linear(config.hidden_size * 2, 2)
-        self.dropout = nn.Dropout(0.1)
-        torch.nn.init.normal_(self.fc.weight, std=0.02)
+        # self.dropout = nn.Dropout(0.1)
+        # torch.nn.init.normal_(self.fc.weight, std=0.02)
         # self.high_dropout = nn.ModuleList([nn.Dropout(p) for p in np.linspace(0.1, 0.5, 5)])
 
     def forward(self, input_ids, attention_mask, start_positions=None, end_positions=None, use_jaccard_soft=False):
@@ -93,7 +93,7 @@ class RobertaForQuestionAnswering(BertPreTrainedModel):
         out = torch.cat([hidden_states[-1], hidden_states[-2]], dim=-1)
         # out = self.conv(out).permute(0, 2, 1)
         # out = F.relu(out)
-        out = self.dropout(out)
+        # out = self.dropout(out)
         logits = self.fc(out)
         # all_logits = []
         # for dropout in self.high_dropout:
