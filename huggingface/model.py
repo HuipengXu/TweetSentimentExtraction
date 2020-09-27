@@ -199,22 +199,23 @@ class BertForQuestionAnswering(BertPreTrainedModel):
     def __init__(self, config):
         super(BertForQuestionAnswering, self).__init__(config)
         self.bert = BertModel(config)
-        self.fc = nn.Linear(config.hidden_size * 2, 2)
-        # self.dropouts = nn.ModuleList([nn.Dropout(p) for p in np.linspace(0.4, 0.8, 5)])
+        # self.fc = nn.Linear(config.hidden_size * 2, 2)
+        self.conv = nn.Conv1d(config.hidden_size * 3, config.hidden_size, kernel_size=3, padding=(3 - 1) // 2)
+        self.fc = nn.Linear(config.hidden_size, 2)
+        self.high_dropout = nn.ModuleList([nn.Dropout(p) for p in np.linspace(0.1, 0.5, 5)])
 
     def forward(self, input_ids, attention_mask, token_type_ids=None,
                 start_positions=None, end_positions=None, use_jaccard_soft=False):
         hidden_states = self.bert(input_ids, attention_mask, token_type_ids)[-1]
-        out = torch.cat([hidden_states[-1], hidden_states[-2]], dim=-1)
-        logits = self.fc(out)
-        # out = torch.cat(hidden_states[1:], dim=-1)
-        # all_logits = []
-        # for dropout in self.dropouts:
-        #     drop_out = dropout(out)
-        #     logits = self.fc(drop_out)
-        #     all_logits.append(logits)
-        #
-        # logits = torch.stack(all_logits, dim=2).mean(dim=2)
+        out = torch.cat([hidden_states[-1], hidden_states[-2], hidden_states[-3]], dim=-1).permute(0, 2, 1)
+        out = self.conv(out).permute(0, 2, 1)
+        out = F.relu(out)
+        all_logits = []
+        for dropout in self.high_dropout:
+            drop_out = dropout(out)
+            logits = self.fc(drop_out)
+            all_logits.append(logits)
+        logits = torch.stack(all_logits, dim=2).mean(dim=2)
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits = start_logits.squeeze(-1)
         end_logits = end_logits.squeeze(-1)
